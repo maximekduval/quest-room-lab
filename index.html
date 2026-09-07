@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Quest Room Lab</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: radial-gradient(130% 110% at 50% 0%, #17223d 0%, #070a12 62%);
+    color: #e9eef8;
+  }
+  #ui {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 16px; padding: 28px; text-align: center;
+  }
+  h1 { margin: 0; font-size: clamp(24px, 5vw, 36px); letter-spacing: -0.025em; }
+  p.sub { margin: 0; max-width: 48ch; line-height: 1.55; color: #9db0d0; font-size: 15px; }
+  button#start {
+    appearance: none; border: 0; cursor: pointer;
+    padding: 15px 30px; border-radius: 999px;
+    font-size: 16px; font-weight: 650; color: #06121f;
+    background: linear-gradient(180deg, #6fe3ff, #29b6f6);
+    box-shadow: 0 10px 30px -8px rgba(41,182,246,.6);
+  }
+  button#start[disabled] { opacity: .4; cursor: not-allowed; box-shadow: none; }
+  #status { font-size: 13px; color: #7f92b3; min-height: 1.2em; }
+  #log {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; line-height: 1.7; color: #6d84a8;
+    max-width: 60ch; text-align: left; white-space: pre-wrap;
+  }
+  .hint { font-size: 12.5px; color: #61748f; max-width: 52ch; line-height: 1.6; }
+  body.xr-active #ui { justify-content: flex-start; background: transparent; }
+  body.xr-active h1, body.xr-active p.sub, body.xr-active #start, body.xr-active .hint { display: none; }
+  body.xr-active #status { color: #cfe3ff; font-size: 15px; text-shadow: 0 2px 8px #000; }
+</style>
+</head>
+<body>
+  <div id="ui">
+    <h1>Quest Room Lab</h1>
+    <p class="sub">
+      Bac à sable WebXR : il lit le maillage 3D et les plans sémantiques de ta pièce
+      (ceux du Space Setup du casque), les affiche par-dessus le passthrough,
+      et fait rebondir des balles sur tes vrais murs, ton sol et tes meubles.
+    </p>
+    <button id="start" disabled>Entrer en réalité mixte</button>
+    <div id="status">Vérification du support WebXR…</div>
+    <div id="log"></div>
+    <div class="hint">
+      Gâchette droite : tirer une balle · Gâchette gauche : poser un repère ancré ·
+      Grip : changer de mode d'affichage
+    </div>
+  </div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+/* ------------------------------------------------------------------ *
+ *  Quest Room Lab — démo WebXR d'exploitation du mapping de la pièce
+ *  - plane-detection : plans sémantiques (sol, mur, table, canapé…)
+ *  - mesh-detection  : maillage 3D de la pièce (Quest 3 / 3S)
+ *  - hit-test        : viser une surface réelle
+ *  - anchors         : poser un repère qui reste collé au monde réel
+ *  - physique        : balles qui rebondissent sur la géométrie réelle
+ * ------------------------------------------------------------------ */
+
+const ui = {
+  body:   document.body,
+  root:   document.getElementById('ui'),
+  start:  document.getElementById('start'),
+  status: document.getElementById('status'),
+  log:    document.getElementById('log'),
+};
+
+const lines = [];
+function log(msg) {
+  lines.push(msg);
+  if (lines.length > 8) lines.shift();
+  ui.log.textContent = lines.join('\n');
+}
+
+// Couleurs par étiquette sémantique renvoyée par le casque.
+const LABEL_COLORS = {
+  floor: 0x3ba3ff, ceiling: 0x9b6bff, wall: 0x00e5c0,
+  table: 0xffc247, desk: 0xffc247, couch: 0xff6b9d,
+  door: 0xff8a3d, window: 0x7cf3ff, 'wall art': 0xff5c5c,
+  screen: 0xff5c5c, storage: 0xc0ff5c, bed: 0xff9ecb,
+  lamp: 0xfff07c, plant: 0x6bff8a, 'global mesh': 0x8fa7ff,
+  other: 0x9aa4b2,
+};
+const colorFor = (label) => LABEL_COLORS[(label || 'other').toLowerCase()] ?? LABEL_COLORS.other;
+
+const MODES = ['Plans + maillage', 'Plans sémantiques', 'Maillage 3D', 'Passthrough pur'];
+
+let renderer, scene, camera, reticle, hud, hudCtx, hudTexture;
+let hitTestSource = null, lastHitResult = null, leftGrip = null;
+let displayMode = 0, lastTime = 0, hudTimer = 0;
+
+const planeEntries  = new Map();  // XRPlane  -> { group, mesh, changed }
+const meshEntries   = new Map();  // XRMesh   -> { group, mesh, changed }
+const anchorEntries = new Map();  // XRAnchor -> Object3D
+const balls = [];
+
+const planeRoot = new THREE.Group();
+const meshRoot  = new THREE.Group();
+const stats = { planes: 0, meshes: 0, tris: 0, labels: new Set(), features: [] };
+
+/* ---------------------------------- init --------------------------- */
+
+function init() {
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 60);
+
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.setClearColor(0x000000, 0);       // fond transparent => passthrough
+  renderer.xr.enabled = true;
+  renderer.xr.setReferenceSpaceType('local-floor');
+  document.body.appendChild(renderer.domElement);
+  renderer.domElement.style.cssText = 'position:fixed;inset:0;z-index:-1';
+
+  scene.add(new THREE.HemisphereLight(0xd8ecff, 0x2a3550, 2.2));
+  const dir = new THREE.DirectionalLight(0xffffff, 1.4);
+  dir.position.set(1.5, 3, 1);
+  scene.add(dir);
+
+  scene.add(planeRoot, meshRoot);
+
+  // Réticule projeté sur la surface réelle visée par la main gauche.
+  reticle = new THREE.Mesh(
+    new THREE.RingGeometry(0.045, 0.06, 40).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ color: 0x7cf3ff, transparent: true, opacity: 0.9, side: THREE.DoubleSide })
+  );
+  reticle.visible = false;
+  reticle.matrixAutoUpdate = false;
+  scene.add(reticle);
+
+  buildHud();
+  setupControllers();
+
+  addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+
+  renderer.setAnimationLoop(tick);
+}
+
+/* -------------------------------- HUD 3D --------------------------- */
+
+function buildHud() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512; canvas.height = 288;
+  hudCtx = canvas.getContext('2d');
+  hudTexture = new THREE.CanvasTexture(canvas);
+  hudTexture.colorSpace = THREE.SRGBColorSpace;
+
+  hud = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.19, 0.107),
+    new THREE.MeshBasicMaterial({ map: hudTexture, transparent: true })
+  );
+  hud.position.set(0, 0.05, -0.06);
+  hud.rotation.set(-0.95, 0, 0);
+  hud.visible = false;
+  scene.add(hud);
+}
+
+function drawHud() {
+  const c = hudCtx, w = 512, h = 288;
+  c.clearRect(0, 0, w, h);
+  c.fillStyle = 'rgba(8,14,26,0.86)';
+  c.beginPath(); c.roundRect(0, 0, w, h, 22); c.fill();
+  c.strokeStyle = 'rgba(124,243,255,0.35)'; c.lineWidth = 2; c.stroke();
+
+  c.fillStyle = '#7cf3ff';
+  c.font = '600 26px system-ui, sans-serif';
+  c.fillText('Quest Room Lab', 26, 46);
+
+  c.font = '400 20px system-ui, sans-serif';
+  c.fillStyle = '#e9eef8';
+  const rows = [
+    `Mode : ${MODES[displayMode]}`,
+    `Plans détectés : ${stats.planes}`,
+    `Maillages : ${stats.meshes}  (${stats.tris.toLocaleString('fr-FR')} tris)`,
+    `Balles actives : ${balls.length}`,
+  ];
+  rows.forEach((t, i) => c.fillText(t, 26, 90 + i * 32));
+
+  c.font = '400 16px system-ui, sans-serif';
+  c.fillStyle = '#8ba0c2';
+  const labels = [...stats.labels].slice(0, 7).join(' · ') || 'aucune étiquette';
+  c.fillText(labels.length > 58 ? labels.slice(0, 58) + '…' : labels, 26, 232);
+  c.fillStyle = '#5f7496';
+  c.fillText(stats.features.join(' · ') || '—', 26, 262);
+
+  hudTexture.needsUpdate = true;
+}
+
+/* ------------------------------ contrôleurs ------------------------ */
+
+function setupControllers() {
+  const rayGeo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1),
+  ]);
+
+  for (let i = 0; i < 2; i++) {
+    const controller = renderer.xr.getController(i);
+    const ray = new THREE.Line(rayGeo, new THREE.LineBasicMaterial({ color: 0x7cf3ff, transparent: true, opacity: 0.5 }));
+    ray.scale.z = 3;
+    ray.visible = false;
+    controller.add(ray);
+
+    controller.addEventListener('connected', (e) => {
+      controller.userData.handedness = e.data.handedness;
+      ray.visible = true;
+      if (e.data.handedness === 'left') requestHitTest(e.data);
+    });
+    controller.addEventListener('disconnected', () => {
+      ray.visible = false;
+      controller.userData.handedness = null;
+    });
+    controller.addEventListener('selectstart', onSelect);
+    controller.addEventListener('squeezestart', cycleDisplayMode);
+    scene.add(controller);
+
+    const grip = renderer.xr.getControllerGrip(i);
+    grip.add(new THREE.Mesh(
+      new THREE.SphereGeometry(0.014, 16, 12),
+      new THREE.MeshStandardMaterial({ color: 0x7cf3ff, emissive: 0x1b4a5a, roughness: 0.4 })
+    ));
+    grip.addEventListener('connected', (e) => {
+      if (e.data.handedness === 'left') { leftGrip = grip; grip.add(hud); hud.visible = true; }
+    });
+    scene.add(grip);
+  }
+}
+
+async function requestHitTest(inputSource) {
+  try {
+    const session = renderer.xr.getSession();
+    hitTestSource = await session.requestHitTestSource({ space: inputSource.targetRaySpace });
+  } catch (err) {
+    console.warn('hit-test indisponible', err);
+  }
+}
+
+function cycleDisplayMode() {
+  displayMode = (displayMode + 1) % MODES.length;
+  planeRoot.visible = displayMode === 0 || displayMode === 1;
+  meshRoot.visible  = displayMode === 0 || displayMode === 2;
+}
+
+function onSelect(event) {
+  const controller = event.target;
+  if (controller.userData.handedness === 'left') placeMarker();
+  else shootBall(controller);
+}
+
+/* --------------------------- objets virtuels ----------------------- */
+
+const ballGeo = new THREE.SphereGeometry(0.045, 20, 14);
+const BALL_HUES = [0xff6b9d, 0x7cf3ff, 0xffc247, 0x6bff8a, 0xc08bff];
+
+function shootBall(controller) {
+  const mat = new THREE.MeshStandardMaterial({
+    color: BALL_HUES[balls.length % BALL_HUES.length],
+    roughness: 0.25, metalness: 0.1, emissive: 0x101820,
+  });
+  const mesh = new THREE.Mesh(ballGeo, mat);
+
+  const pos = new THREE.Vector3(), quat = new THREE.Quaternion();
+  controller.getWorldPosition(pos);
+  controller.getWorldQuaternion(quat);
+  mesh.position.copy(pos);
+  scene.add(mesh);
+
+  balls.push({
+    mesh,
+    velocity: new THREE.Vector3(0, 0, -1).applyQuaternion(quat).multiplyScalar(5.5),
+    born: performance.now(),
+    resting: false,
+  });
+
+  if (balls.length > 28) {
+    const old = balls.shift();
+    scene.remove(old.mesh);
+    old.mesh.material.dispose();
+  }
+}
+
+function makeMarker() {
+  const group = new THREE.Group();
+  group.add(new THREE.Mesh(
+    new THREE.CylinderGeometry(0.008, 0.008, 0.16, 12).translate(0, 0.08, 0),
+    new THREE.MeshStandardMaterial({ color: 0x7cf3ff, emissive: 0x2a7d95, roughness: 0.3 })
+  ));
+  group.add(new THREE.Mesh(
+    new THREE.RingGeometry(0.03, 0.045, 32).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ color: 0x7cf3ff, transparent: true, opacity: 0.75, side: THREE.DoubleSide })
+  ));
+  return group;
+}
+
+function placeMarker() {
+  if (!lastHitResult) return;
+  const marker = makeMarker();
+  scene.add(marker);
+
+  if (typeof lastHitResult.createAnchor === 'function') {
+    lastHitResult.createAnchor().then(
+      (anchor) => anchorEntries.set(anchor, marker),
+      () => marker.matrix.copy(reticle.matrix).decompose(marker.position, marker.quaternion, marker.scale)
+    );
+  } else {
+    marker.matrix.copy(reticle.matrix).decompose(marker.position, marker.quaternion, marker.scale);
+  }
+}
+
+/* ------------------- lecture du mapping de la pièce ----------------- */
+
+function applyPose(object3D, pose) {
+  object3D.matrix.fromArray(pose.transform.matrix);
+  object3D.matrix.decompose(object3D.position, object3D.quaternion, object3D.scale);
+}
+
+function buildPlaneVisual(plane) {
+  const group = new THREE.Group();
+  const polygon = plane.polygon ?? [];
+  if (polygon.length < 3) return { group, mesh: null };
+
+  const shape = new THREE.Shape(polygon.map((p) => new THREE.Vector2(p.x, p.z)));
+  const geometry = new THREE.ShapeGeometry(shape).rotateX(Math.PI / 2);
+  const color = colorFor(plane.semanticLabel);
+
+  const fill = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+    color, transparent: true, opacity: 0.16, side: THREE.DoubleSide,
+    depthWrite: false, blending: THREE.AdditiveBlending,
+  }));
+  group.add(fill);
+
+  const outline = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geometry),
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 })
+  );
+  group.add(outline);
+
+  if (plane.semanticLabel) group.add(makeLabelSprite(plane.semanticLabel, color));
+  return { group, mesh: fill };
+}
+
+function makeLabelSprite(text, color) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256; canvas.height = 64;
+  const c = canvas.getContext('2d');
+  c.fillStyle = 'rgba(6,12,22,0.8)';
+  c.beginPath(); c.roundRect(0, 0, 256, 64, 16); c.fill();
+  c.fillStyle = '#' + color.toString(16).padStart(6, '0');
+  c.font = '600 30px system-ui, sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(text, 128, 34);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }));
+  sprite.scale.set(0.24, 0.06, 1);
+  sprite.position.y = 0.05;
+  return sprite;
+}
+
+function buildMeshVisual(xrMesh) {
+  const group = new THREE.Group();
+  const vertices = xrMesh.vertices ?? xrMesh.positions;
+  const indices = xrMesh.indices;
+  if (!vertices || !indices) return { group, mesh: null, tris: 0 };
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+  geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+  geometry.computeVertexNormals();
+
+  const color = colorFor(xrMesh.semanticLabel || 'global mesh');
+  const surface = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+    color, transparent: true, opacity: 0.07, side: THREE.DoubleSide,
+    depthWrite: false, blending: THREE.AdditiveBlending,
+  }));
+  const wire = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+    color, wireframe: true, transparent: true, opacity: 0.38,
+  }));
+  group.add(surface, wire);
+  return { group, mesh: surface, tris: indices.length / 3 };
+}
+
+function syncDetected(frame, refSpace, detectedSet, entries, root, build, spaceKey) {
+  if (!detectedSet) return;
+
+  for (const [key, entry] of entries) {
+    if (!detectedSet.has(key)) {
+      root.remove(entry.group);
+      entry.group.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.(); });
+      entries.delete(key);
+    }
+  }
+
+  for (const item of detectedSet) {
+    let entry = entries.get(item);
+    if (!entry || entry.changed !== item.lastChangedTime) {
+      if (entry) {
+        root.remove(entry.group);
+        entry.group.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.(); });
+      }
+      entry = build(item);
+      entry.changed = item.lastChangedTime;
+      entries.set(item, entry);
+      root.add(entry.group);
+    }
+    const pose = frame.getPose(item[spaceKey], refSpace);
+    if (pose) { entry.group.visible = true; applyPose(entry.group, pose); }
+    else entry.group.visible = false;
+  }
+}
+
+function updateRoomModel(frame, refSpace) {
+  syncDetected(frame, refSpace, frame.detectedPlanes, planeEntries, planeRoot, buildPlaneVisual, 'planeSpace');
+  syncDetected(frame, refSpace, frame.detectedMeshes, meshEntries, meshRoot, buildMeshVisual, 'meshSpace');
+
+  stats.planes = planeEntries.size;
+  stats.meshes = meshEntries.size;
+  stats.tris = 0;
+  stats.labels.clear();
+  for (const [plane] of planeEntries) if (plane.semanticLabel) stats.labels.add(plane.semanticLabel);
+  for (const [, entry] of meshEntries) stats.tris += entry.tris ?? 0;
+}
+
+function updateAnchors(frame, refSpace) {
+  for (const [anchor, object] of anchorEntries) {
+    const pose = frame.getPose(anchor.anchorSpace, refSpace);
+    if (pose) { object.visible = true; applyPose(object, pose); }
+    else object.visible = false;
+  }
+}
+
+function updateHitTest(frame, refSpace) {
+  if (!hitTestSource) { reticle.visible = false; return; }
+  const results = frame.getHitTestResults(hitTestSource);
+  if (results.length) {
+    const pose = results[0].getPose(refSpace);
+    if (pose) {
+      lastHitResult = results[0];
+      reticle.visible = true;
+      reticle.matrix.fromArray(pose.transform.matrix);
+      return;
+    }
+  }
+  lastHitResult = null;
+  reticle.visible = false;
+}
+
+/* ------------- physique : rebond sur la géométrie réelle ------------ */
+
+const raycaster = new THREE.Raycaster();
+const GRAVITY = -9.81, RESTITUTION = 0.52, RADIUS = 0.045;
+const step = new THREE.Vector3(), normal = new THREE.Vector3();
+
+function collisionTargets() {
+  const targets = [];
+  for (const [, entry] of meshEntries)  if (entry.mesh && entry.group.visible) targets.push(entry.mesh);
+  for (const [, entry] of planeEntries) if (entry.mesh && entry.group.visible) targets.push(entry.mesh);
+  return targets;
+}
+
+function updateBalls(dt) {
+  if (!balls.length) return;
+  const targets = collisionTargets();
+  const now = performance.now();
+
+  for (let i = balls.length - 1; i >= 0; i--) {
+    const ball = balls[i];
+    if (now - ball.born > 30000 || ball.mesh.position.y < -8) {
+      scene.remove(ball.mesh);
+      ball.mesh.material.dispose();
+      balls.splice(i, 1);
+      continue;
+    }
+    if (ball.resting) continue;
+
+    ball.velocity.y += GRAVITY * dt;
+    step.copy(ball.velocity).multiplyScalar(dt);
+    const distance = step.length();
+    if (distance < 1e-6) continue;
+
+    let hit = null;
+    if (targets.length) {
+      raycaster.set(ball.mesh.position, step.clone().divideScalar(distance));
+      raycaster.far = distance + RADIUS;
+      hit = raycaster.intersectObjects(targets, false)[0] ?? null;
+    }
+
+    if (hit && hit.face) {
+      normal.copy(hit.face.normal).transformDirection(hit.object.matrixWorld).normalize();
+      if (normal.dot(ball.velocity) > 0) normal.negate();
+      ball.mesh.position.copy(hit.point).addScaledVector(normal, RADIUS);
+      ball.velocity.reflect(normal).multiplyScalar(RESTITUTION);
+      if (ball.velocity.length() < 0.45 && normal.y > 0.6) {
+        ball.velocity.set(0, 0, 0);
+        ball.resting = true;
+      }
+    } else {
+      ball.mesh.position.add(step);
+    }
+  }
+}
+
+/* -------------------------------- boucle --------------------------- */
+
+function tick(time, frame) {
+  const dt = Math.min((time - lastTime) / 1000 || 0, 0.05);
+  lastTime = time;
+
+  if (frame) {
+    const refSpace = renderer.xr.getReferenceSpace();
+    if (refSpace) {
+      updateRoomModel(frame, refSpace);
+      updateAnchors(frame, refSpace);
+      updateHitTest(frame, refSpace);
+    }
+  }
+
+  scene.updateMatrixWorld(true);
+  updateBalls(dt);
+
+  hudTimer += dt;
+  if (hudTimer > 0.25) { hudTimer = 0; drawHud(); }
+
+  renderer.render(scene, camera);
+}
+
+/* ------------------------------ session ---------------------------- */
+
+async function startSession() {
+  ui.start.disabled = true;
+  ui.status.textContent = 'Ouverture de la session…';
+
+  try {
+    const session = await navigator.xr.requestSession('immersive-ar', {
+      requiredFeatures: ['local-floor'],
+      optionalFeatures: ['plane-detection', 'mesh-detection', 'hit-test', 'anchors', 'hand-tracking', 'dom-overlay'],
+      domOverlay: { root: ui.root },
+    });
+
+    stats.features = (session.enabledFeatures ?? []).filter((f) => f !== 'viewer' && f !== 'local-floor');
+    ui.body.classList.add('xr-active');
+    ui.status.textContent = stats.features.length
+      ? 'Actif : ' + stats.features.join(', ')
+      : 'Session active';
+
+    session.addEventListener('end', () => {
+      ui.body.classList.remove('xr-active');
+      ui.start.disabled = false;
+      ui.status.textContent = 'Session terminée.';
+      hitTestSource = null;
+      planeEntries.clear(); meshEntries.clear(); anchorEntries.clear();
+      planeRoot.clear(); meshRoot.clear();
+      balls.splice(0).forEach((b) => scene.remove(b.mesh));
+    });
+
+    await renderer.xr.setSession(session);
+  } catch (err) {
+    ui.start.disabled = false;
+    ui.status.textContent = 'Échec : ' + err.message;
+    log('Erreur : ' + err);
+  }
+}
+
+async function checkSupport() {
+  if (!navigator.xr) {
+    ui.status.textContent = "Ce navigateur n'expose pas WebXR.";
+    log('Ouvre cette page dans le navigateur du Meta Quest (en HTTPS).');
+    return;
+  }
+  const arOk = await navigator.xr.isSessionSupported('immersive-ar').catch(() => false);
+  if (!arOk) {
+    ui.status.textContent = 'Mode réalité mixte (immersive-ar) non supporté ici.';
+    log('Ouvre cette page dans le navigateur du Meta Quest (en HTTPS).');
+    return;
+  }
+  ui.start.disabled = false;
+  ui.status.textContent = 'Réalité mixte disponible.';
+  log('Astuce : lance d\'abord le Space Setup du casque pour que la pièce soit scannée.');
+}
+
+init();
+checkSupport();
+ui.start.addEventListener('click', startSession);
+</script>
+</body>
+</html>
