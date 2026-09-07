@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Quest Room Lab</title>
+<title>Room Twin</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -15,53 +15,83 @@
     color: #e9eef8;
   }
   #ui {
-    position: fixed; inset: 0;
+    position: fixed; inset: 0; overflow-y: auto;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 16px; padding: 28px; text-align: center;
   }
   h1 { margin: 0; font-size: clamp(24px, 5vw, 36px); letter-spacing: -0.025em; }
-  p.sub { margin: 0; max-width: 48ch; line-height: 1.55; color: #9db0d0; font-size: 15px; }
-  button#start {
+  p.sub { margin: 0; max-width: 50ch; line-height: 1.55; color: #9db0d0; font-size: 15px; }
+  button {
     appearance: none; border: 0; cursor: pointer;
-    padding: 15px 30px; border-radius: 999px;
-    font-size: 16px; font-weight: 650; color: #06121f;
+    padding: 14px 28px; border-radius: 999px;
+    font-size: 15px; font-weight: 650; color: #06121f;
     background: linear-gradient(180deg, #6fe3ff, #29b6f6);
     box-shadow: 0 10px 30px -8px rgba(41,182,246,.6);
   }
-  button#start[disabled] { opacity: .4; cursor: not-allowed; box-shadow: none; }
+  button[disabled] { opacity: .4; cursor: not-allowed; box-shadow: none; }
+  button.ghost {
+    background: transparent; color: #7cf3ff;
+    border: 1px solid rgba(124,243,255,.45); box-shadow: none; font-weight: 550;
+  }
   #status { font-size: 13px; color: #7f92b3; min-height: 1.2em; }
   #log {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 12px; line-height: 1.7; color: #6d84a8;
-    max-width: 60ch; text-align: left; white-space: pre-wrap;
+    max-width: 62ch; text-align: left; white-space: pre-wrap;
   }
-  .hint { font-size: 12.5px; color: #61748f; max-width: 52ch; line-height: 1.6; }
+  .hint { font-size: 12.5px; color: #61748f; max-width: 56ch; line-height: 1.7; }
+  #report { display: none; width: 100%; max-width: 620px; text-align: left; }
+  #report.show { display: block; }
+  #report h2 { font-size: 16px; margin: 0 0 10px; color: #7cf3ff; }
+  #inventory {
+    border: 1px solid rgba(124,243,255,.18); border-radius: 14px;
+    background: rgba(10,17,30,.6); padding: 6px 16px; margin-bottom: 14px;
+  }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; font-size: 14px;
+         border-bottom: 1px solid rgba(124,243,255,.08); }
+  .row:last-child { border-bottom: 0; }
+  .row .k { color: #cfe0f7; } .row .v { color: #7f94b6; font-variant-numeric: tabular-nums; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; }
   body.xr-active #ui { justify-content: flex-start; background: transparent; }
-  body.xr-active h1, body.xr-active p.sub, body.xr-active #start, body.xr-active .hint { display: none; }
+  body.xr-active h1, body.xr-active p.sub, body.xr-active .hint,
+  body.xr-active #start, body.xr-active #report { display: none; }
   body.xr-active #status { color: #cfe3ff; font-size: 15px; text-shadow: 0 2px 8px #000; }
 </style>
 </head>
 <body>
   <div id="ui">
-    <h1>Quest Room Lab</h1>
+    <h1>Room Twin</h1>
     <p class="sub">
-      Bac à sable WebXR : il lit le maillage 3D et les plans sémantiques de ta pièce
-      (ceux du Space Setup du casque), les affiche par-dessus le passthrough,
-      et fait rebondir des balles sur tes vrais murs, ton sol et tes meubles.
+      Lit le scan de ta pièce, identifie chaque élément (sol, murs, portes, fenêtres,
+      table, canapé…), en reconstruit un <strong>jumeau virtuel fidèle</strong>, puis fait
+      fondre le passthrough pour te laisser dans la version virtuelle de ton propre salon.
+      Exportable en JSON et en GLB.
     </p>
     <button id="start" disabled>Entrer en réalité mixte</button>
     <div id="status">Vérification du support WebXR…</div>
     <div id="log"></div>
     <div class="hint">
-      Gâchette droite : tirer une balle · Gâchette gauche : poser un repère ancré ·
-      Grip : changer de mode d'affichage
+      <strong>Grip droit</strong> : basculer réel ↔ virtuel ·
+      <strong>Grip gauche</strong> : changer de style ·
+      <strong>Gâchette droite</strong> : tirer une balle ·
+      <strong>Gâchette gauche</strong> : poser un repère ancré
+    </div>
+
+    <div id="report">
+      <h2>Inventaire du scan</h2>
+      <div id="inventory"></div>
+      <div class="actions">
+        <button class="ghost" id="dl-json">Télécharger le scan (.json)</button>
+        <button class="ghost" id="dl-glb">Télécharger le jumeau (.glb)</button>
+      </div>
     </div>
   </div>
 
 <script type="importmap">
 {
   "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js"
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
   }
 }
 </script>
@@ -69,21 +99,72 @@
 <script type="module">
 import * as THREE from 'three';
 
-/* ------------------------------------------------------------------ *
- *  Quest Room Lab — démo WebXR d'exploitation du mapping de la pièce
- *  - plane-detection : plans sémantiques (sol, mur, table, canapé…)
- *  - mesh-detection  : maillage 3D de la pièce (Quest 3 / 3S)
- *  - hit-test        : viser une surface réelle
- *  - anchors         : poser un repère qui reste collé au monde réel
- *  - physique        : balles qui rebondissent sur la géométrie réelle
- * ------------------------------------------------------------------ */
+/* =================================================================== *
+ *  Room Twin — jumeau numérique de ta pièce, sur Meta Quest (WebXR)
+ *
+ *  1. Lecture du scan : plans sémantiques + maillage 3D du casque
+ *  2. Compréhension   : inventaire typé de chaque élément détecté
+ *  3. Reconstruction  : un jumeau virtuel volumétrique, à l'échelle 1:1
+ *  4. Bascule         : fondu du passthrough vers le monde virtuel
+ *  5. Export          : JSON (données brutes) et GLB (modèle 3D)
+ * =================================================================== */
+
+const REAL = 0, VIRTUAL = 1;
+
+/* ------------------------- styles du jumeau ------------------------ */
+
+const THEMES = [
+  {
+    name: 'Argile',
+    sky: 0x1b2436, fog: 0x1b2436,
+    floor: 0xb9c4d4, wall: 0xdfe6ef, ceiling: 0x9fadc0,
+    furniture: 0xf2b06a, opening: 0x9fe8ff, mesh: 0xa8b6cb,
+    edges: 0x2c3a4e, wire: false,
+  },
+  {
+    name: 'Blueprint',
+    sky: 0x040a1c, fog: 0x040a1c,
+    floor: 0x0d2a52, wall: 0x123a6e, ceiling: 0x0a2244,
+    furniture: 0x1d5aa0, opening: 0x7cf3ff, mesh: 0x1a4c8c,
+    edges: 0x7cf3ff, wire: true,
+  },
+  {
+    name: 'Néon',
+    sky: 0x0a0418, fog: 0x0a0418,
+    floor: 0x1a0b34, wall: 0x220d3f, ceiling: 0x140828,
+    furniture: 0x3a1263, opening: 0xff6bd6, mesh: 0x2a0f4a,
+    edges: 0xff6bd6, wire: false,
+  },
+];
+
+// Étiquettes sémantiques renvoyées par le casque, regroupées par rôle.
+const STRUCTURE = new Set(['floor', 'ceiling', 'wall']);
+const OPENINGS  = new Set(['door', 'window', 'wall art', 'screen']);
+const VOLUMES   = new Set(['table', 'desk', 'couch', 'bed', 'storage', 'shelf',
+                           'cabinet', 'lamp', 'plant', 'screen', 'other']);
+
+const OVERLAY_COLORS = {
+  floor: 0x3ba3ff, ceiling: 0x9b6bff, wall: 0x00e5c0,
+  table: 0xffc247, desk: 0xffc247, couch: 0xff6b9d,
+  door: 0xff8a3d, window: 0x7cf3ff, 'wall art': 0xff5c5c,
+  screen: 0xff5c5c, storage: 0xc0ff5c, bed: 0xff9ecb,
+  lamp: 0xfff07c, plant: 0x6bff8a, 'global mesh': 0x8fa7ff,
+  other: 0x9aa4b2,
+};
+const overlayColor = (l) => OVERLAY_COLORS[(l || 'other').toLowerCase()] ?? OVERLAY_COLORS.other;
+
+/* ------------------------------- état ------------------------------ */
 
 const ui = {
-  body:   document.body,
-  root:   document.getElementById('ui'),
-  start:  document.getElementById('start'),
+  body: document.body,
+  root: document.getElementById('ui'),
+  start: document.getElementById('start'),
   status: document.getElementById('status'),
-  log:    document.getElementById('log'),
+  log: document.getElementById('log'),
+  report: document.getElementById('report'),
+  inventory: document.getElementById('inventory'),
+  dlJson: document.getElementById('dl-json'),
+  dlGlb: document.getElementById('dl-glb'),
 };
 
 const lines = [];
@@ -93,55 +174,51 @@ function log(msg) {
   ui.log.textContent = lines.join('\n');
 }
 
-// Couleurs par étiquette sémantique renvoyée par le casque.
-const LABEL_COLORS = {
-  floor: 0x3ba3ff, ceiling: 0x9b6bff, wall: 0x00e5c0,
-  table: 0xffc247, desk: 0xffc247, couch: 0xff6b9d,
-  door: 0xff8a3d, window: 0x7cf3ff, 'wall art': 0xff5c5c,
-  screen: 0xff5c5c, storage: 0xc0ff5c, bed: 0xff9ecb,
-  lamp: 0xfff07c, plant: 0x6bff8a, 'global mesh': 0x8fa7ff,
-  other: 0x9aa4b2,
-};
-const colorFor = (label) => LABEL_COLORS[(label || 'other').toLowerCase()] ?? LABEL_COLORS.other;
+let renderer, scene, camera, reticle, hud, hudCtx, hudTexture, dome;
+let hitTestSource = null, lastHitResult = null;
+let mode = REAL, blend = 0, themeIndex = 0;
+let lastTime = 0, hudTimer = 0;
 
-const MODES = ['Plans + maillage', 'Plans sémantiques', 'Maillage 3D', 'Passthrough pur'];
-
-let renderer, scene, camera, reticle, hud, hudCtx, hudTexture;
-let hitTestSource = null, lastHitResult = null, leftGrip = null;
-let displayMode = 0, lastTime = 0, hudTimer = 0;
-
-const planeEntries  = new Map();  // XRPlane  -> { group, mesh, changed }
-const meshEntries   = new Map();  // XRMesh   -> { group, mesh, changed }
+const items = new Map();          // XRPlane | XRMesh -> item
 const anchorEntries = new Map();  // XRAnchor -> Object3D
 const balls = [];
 
-const planeRoot = new THREE.Group();
-const meshRoot  = new THREE.Group();
-const stats = { planes: 0, meshes: 0, tris: 0, labels: new Set(), features: [] };
+const scanRoot = new THREE.Group();
+const overlayMaterials = [];
+const twinMaterials = [];
 
-/* ---------------------------------- init --------------------------- */
+const inventory = { byLabel: new Map(), planes: 0, meshes: 0, tris: 0, floorArea: 0, features: [] };
+const theme = () => THEMES[themeIndex];
+
+/* ------------------------------- init ------------------------------ */
 
 function init() {
   scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 60);
+  camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 80);
 
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setSize(innerWidth, innerHeight);
-  renderer.setClearColor(0x000000, 0);       // fond transparent => passthrough
+  renderer.setClearColor(0x000000, 0);
   renderer.xr.enabled = true;
   renderer.xr.setReferenceSpaceType('local-floor');
   document.body.appendChild(renderer.domElement);
   renderer.domElement.style.cssText = 'position:fixed;inset:0;z-index:-1';
 
-  scene.add(new THREE.HemisphereLight(0xd8ecff, 0x2a3550, 2.2));
-  const dir = new THREE.DirectionalLight(0xffffff, 1.4);
-  dir.position.set(1.5, 3, 1);
-  scene.add(dir);
+  scene.add(new THREE.HemisphereLight(0xdcecff, 0x2a3550, 2.0));
+  const key = new THREE.DirectionalLight(0xffffff, 1.5);
+  key.position.set(1.5, 3, 1);
+  scene.add(key, scanRoot);
 
-  scene.add(planeRoot, meshRoot);
+  // Dôme opaque : c'est lui qui masque le passthrough en mode virtuel.
+  dome = new THREE.Mesh(
+    new THREE.SphereGeometry(24, 32, 20),
+    new THREE.MeshBasicMaterial({ side: THREE.BackSide, transparent: true, opacity: 0, depthWrite: false })
+  );
+  dome.renderOrder = -1;
+  dome.visible = false;
+  scene.add(dome);
 
-  // Réticule projeté sur la surface réelle visée par la main gauche.
   reticle = new THREE.Mesh(
     new THREE.RingGeometry(0.045, 0.06, 40).rotateX(-Math.PI / 2),
     new THREE.MeshBasicMaterial({ color: 0x7cf3ff, transparent: true, opacity: 0.9, side: THREE.DoubleSide })
@@ -152,6 +229,7 @@ function init() {
 
   buildHud();
   setupControllers();
+  applyTheme();
 
   addEventListener('resize', () => {
     camera.aspect = innerWidth / innerHeight;
@@ -162,17 +240,22 @@ function init() {
   renderer.setAnimationLoop(tick);
 }
 
-/* -------------------------------- HUD 3D --------------------------- */
+function applyTheme() {
+  dome.material.color.setHex(theme().sky);
+  for (const entry of twinMaterials) styleEntry(entry);
+}
+
+/* -------------------------------- HUD ------------------------------ */
 
 function buildHud() {
   const canvas = document.createElement('canvas');
-  canvas.width = 512; canvas.height = 288;
+  canvas.width = 512; canvas.height = 320;
   hudCtx = canvas.getContext('2d');
   hudTexture = new THREE.CanvasTexture(canvas);
   hudTexture.colorSpace = THREE.SRGBColorSpace;
 
   hud = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.19, 0.107),
+    new THREE.PlaneGeometry(0.2, 0.125),
     new THREE.MeshBasicMaterial({ map: hudTexture, transparent: true })
   );
   hud.position.set(0, 0.05, -0.06);
@@ -182,37 +265,50 @@ function buildHud() {
 }
 
 function drawHud() {
-  const c = hudCtx, w = 512, h = 288;
+  const c = hudCtx, w = 512, h = 320;
   c.clearRect(0, 0, w, h);
-  c.fillStyle = 'rgba(8,14,26,0.86)';
+  c.fillStyle = 'rgba(8,14,26,0.88)';
   c.beginPath(); c.roundRect(0, 0, w, h, 22); c.fill();
   c.strokeStyle = 'rgba(124,243,255,0.35)'; c.lineWidth = 2; c.stroke();
 
   c.fillStyle = '#7cf3ff';
   c.font = '600 26px system-ui, sans-serif';
-  c.fillText('Quest Room Lab', 26, 46);
+  c.fillText('Room Twin', 26, 44);
+  c.textAlign = 'right';
+  c.fillStyle = mode === VIRTUAL ? '#ff6bd6' : '#8ba0c2';
+  c.font = '600 20px system-ui, sans-serif';
+  c.fillText(mode === VIRTUAL ? 'VIRTUEL · ' + theme().name : 'RÉEL', w - 26, 44);
+  c.textAlign = 'left';
 
-  c.font = '400 20px system-ui, sans-serif';
+  c.font = '400 19px system-ui, sans-serif';
   c.fillStyle = '#e9eef8';
   const rows = [
-    `Mode : ${MODES[displayMode]}`,
-    `Plans détectés : ${stats.planes}`,
-    `Maillages : ${stats.meshes}  (${stats.tris.toLocaleString('fr-FR')} tris)`,
-    `Balles actives : ${balls.length}`,
+    `${inventory.planes} plans · ${inventory.meshes} maillages`,
+    `${inventory.tris.toLocaleString('fr-FR')} triangles`,
+    `Sol : ${inventory.floorArea.toFixed(1)} m²`,
   ];
-  rows.forEach((t, i) => c.fillText(t, 26, 90 + i * 32));
+  rows.forEach((t, i) => c.fillText(t, 26, 84 + i * 28));
 
-  c.font = '400 16px system-ui, sans-serif';
-  c.fillStyle = '#8ba0c2';
-  const labels = [...stats.labels].slice(0, 7).join(' · ') || 'aucune étiquette';
-  c.fillText(labels.length > 58 ? labels.slice(0, 58) + '…' : labels, 26, 232);
-  c.fillStyle = '#5f7496';
-  c.fillText(stats.features.join(' · ') || '—', 26, 262);
+  c.font = '400 17px system-ui, sans-serif';
+  let y = 182;
+  const sorted = [...inventory.byLabel.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
+  for (const [label, n] of sorted) {
+    const col = overlayColor(label);
+    c.fillStyle = '#' + col.toString(16).padStart(6, '0');
+    c.fillRect(26, y - 11, 12, 12);
+    c.fillStyle = '#cfe0f7';
+    c.fillText(`${label} × ${n}`, 46, y);
+    y += 24;
+  }
+  if (!sorted.length) {
+    c.fillStyle = '#8ba0c2';
+    c.fillText('Aucun élément — lance le Space Setup', 26, y);
+  }
 
   hudTexture.needsUpdate = true;
 }
 
-/* ------------------------------ contrôleurs ------------------------ */
+/* ---------------------------- contrôleurs -------------------------- */
 
 function setupControllers() {
   const rayGeo = new THREE.BufferGeometry().setFromPoints([
@@ -236,7 +332,7 @@ function setupControllers() {
       controller.userData.handedness = null;
     });
     controller.addEventListener('selectstart', onSelect);
-    controller.addEventListener('squeezestart', cycleDisplayMode);
+    controller.addEventListener('squeezestart', onSqueeze);
     scene.add(controller);
 
     const grip = renderer.xr.getControllerGrip(i);
@@ -245,7 +341,7 @@ function setupControllers() {
       new THREE.MeshStandardMaterial({ color: 0x7cf3ff, emissive: 0x1b4a5a, roughness: 0.4 })
     ));
     grip.addEventListener('connected', (e) => {
-      if (e.data.handedness === 'left') { leftGrip = grip; grip.add(hud); hud.visible = true; }
+      if (e.data.handedness === 'left') { grip.add(hud); hud.visible = true; }
     });
     scene.add(grip);
   }
@@ -260,16 +356,18 @@ async function requestHitTest(inputSource) {
   }
 }
 
-function cycleDisplayMode() {
-  displayMode = (displayMode + 1) % MODES.length;
-  planeRoot.visible = displayMode === 0 || displayMode === 1;
-  meshRoot.visible  = displayMode === 0 || displayMode === 2;
+function onSelect(event) {
+  if (event.target.userData.handedness === 'left') placeMarker();
+  else shootBall(event.target);
 }
 
-function onSelect(event) {
-  const controller = event.target;
-  if (controller.userData.handedness === 'left') placeMarker();
-  else shootBall(controller);
+function onSqueeze(event) {
+  if (event.target.userData.handedness === 'left') {
+    themeIndex = (themeIndex + 1) % THEMES.length;
+    applyTheme();
+  } else {
+    mode = mode === REAL ? VIRTUAL : REAL;
+  }
 }
 
 /* --------------------------- objets virtuels ----------------------- */
@@ -278,12 +376,10 @@ const ballGeo = new THREE.SphereGeometry(0.045, 20, 14);
 const BALL_HUES = [0xff6b9d, 0x7cf3ff, 0xffc247, 0x6bff8a, 0xc08bff];
 
 function shootBall(controller) {
-  const mat = new THREE.MeshStandardMaterial({
+  const mesh = new THREE.Mesh(ballGeo, new THREE.MeshStandardMaterial({
     color: BALL_HUES[balls.length % BALL_HUES.length],
     roughness: 0.25, metalness: 0.1, emissive: 0x101820,
-  });
-  const mesh = new THREE.Mesh(ballGeo, mat);
-
+  }));
   const pos = new THREE.Vector3(), quat = new THREE.Quaternion();
   controller.getWorldPosition(pos);
   controller.getWorldQuaternion(quat);
@@ -321,7 +417,6 @@ function placeMarker() {
   if (!lastHitResult) return;
   const marker = makeMarker();
   scene.add(marker);
-
   if (typeof lastHitResult.createAnchor === 'function') {
     lastHitResult.createAnchor().then(
       (anchor) => anchorEntries.set(anchor, marker),
@@ -332,36 +427,129 @@ function placeMarker() {
   }
 }
 
-/* ------------------- lecture du mapping de la pièce ----------------- */
+/* ==================== 1-2. lecture et compréhension ================= */
 
-function applyPose(object3D, pose) {
-  object3D.matrix.fromArray(pose.transform.matrix);
-  object3D.matrix.decompose(object3D.position, object3D.quaternion, object3D.scale);
+function polygonArea(polygon) {
+  let a = 0;
+  for (let i = 0, n = polygon.length; i < n; i++) {
+    const p = polygon[i], q = polygon[(i + 1) % n];
+    a += p.x * q.z - q.x * p.z;
+  }
+  return Math.abs(a) / 2;
 }
 
-function buildPlaneVisual(plane) {
+function classify(label, orientation) {
+  const l = (label || '').toLowerCase();
+  if (STRUCTURE.has(l)) return l === 'floor' ? 'floor' : (l === 'ceiling' ? 'ceiling' : 'wall');
+  if (OPENINGS.has(l) && orientation === 'vertical') return 'opening';
+  if (orientation === 'horizontal') return 'volume';
+  return 'wall';
+}
+
+/* ================== 3. reconstruction du jumeau ===================== */
+
+function trackMaterial(list, material, role, flags = {}) {
+  material.transparent = true;
+  const entry = { material, role, baseOpacity: material.opacity, isTwin: list === twinMaterials, ...flags };
+  list.push(entry);
+  // Un élément peut être détecté à tout moment : on l'aligne tout de suite
+  // sur le thème et sur l'état courant du fondu réel↔virtuel.
+  styleEntry(entry);
+  applyBlendToEntry(entry);
+  return material;
+}
+
+function styleEntry(entry) {
+  if (!entry.isTwin) return;
+  const t = theme();
+  entry.material.color.setHex(entry.isEdge ? t.edges : (t[entry.role] ?? t.wall));
+  if (entry.isSurface) entry.material.wireframe = !!t.wire;
+}
+
+function applyBlendToEntry(entry) {
+  const factor = entry.isTwin ? blend : 1 - blend;
+  entry.material.opacity = entry.baseOpacity * factor;
+  entry.material.visible = factor > 0.001;
+}
+
+// Extrude un polygone de plan XR (coordonnées x/z, y≈0) sur `depth`
+// le long de la normale négative du plan — utilisé pour l'épaisseur des
+// murs comme pour le volume des meubles (du plateau jusqu'au sol).
+function extrudePolygon(polygon, depth) {
+  const shape = new THREE.Shape(polygon.map((p) => new THREE.Vector2(p.x, p.z)));
+  const geometry = depth > 0.001
+    ? new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false })
+    : new THREE.ShapeGeometry(shape);
+  geometry.rotateX(Math.PI / 2);
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+function buildTwinForPlane(plane, kind, heightAboveFloor) {
   const group = new THREE.Group();
   const polygon = plane.polygon ?? [];
-  if (polygon.length < 3) return { group, mesh: null };
+  if (polygon.length < 3) return group;
 
-  const shape = new THREE.Shape(polygon.map((p) => new THREE.Vector2(p.x, p.z)));
-  const geometry = new THREE.ShapeGeometry(shape).rotateX(Math.PI / 2);
-  const color = colorFor(plane.semanticLabel);
+  let depth = 0, role = 'wall';
+  if (kind === 'floor')        { depth = 0.02; role = 'floor'; }
+  else if (kind === 'ceiling') { depth = 0.02; role = 'ceiling'; }
+  else if (kind === 'wall')    { depth = 0.04; role = 'wall'; }
+  else if (kind === 'opening') { depth = 0.01; role = 'opening'; }
+  else if (kind === 'volume')  { depth = Math.max(0.03, heightAboveFloor); role = 'furniture'; }
 
-  const fill = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
-    color, transparent: true, opacity: 0.16, side: THREE.DoubleSide,
-    depthWrite: false, blending: THREE.AdditiveBlending,
-  }));
-  group.add(fill);
+  const geometry = extrudePolygon(polygon, depth);
+  const surface = new THREE.Mesh(geometry, trackMaterial(twinMaterials, new THREE.MeshStandardMaterial({
+    color: 0xffffff, roughness: 0.85, metalness: 0.02, side: THREE.DoubleSide,
+    emissive: kind === 'opening' ? 0x224455 : 0x000000,
+    emissiveIntensity: kind === 'opening' ? 1.4 : 0,
+  }), role, { isSurface: true }));
+  group.add(surface);
+  group.userData.collider = surface;
 
-  const outline = new THREE.LineSegments(
-    new THREE.EdgesGeometry(geometry),
-    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 })
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geometry, 25),
+    trackMaterial(twinMaterials, new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.55 }), 'edges', { isEdge: true })
   );
-  group.add(outline);
+  group.add(edges);
+  return group;
+}
 
+function buildTwinForMesh(geometry) {
+  const group = new THREE.Group();
+  const surface = new THREE.Mesh(geometry, trackMaterial(twinMaterials, new THREE.MeshStandardMaterial({
+    color: 0xffffff, roughness: 0.9, metalness: 0.0, side: THREE.DoubleSide, flatShading: true,
+  }), 'mesh', { isSurface: true }));
+  group.add(surface);
+  group.userData.collider = surface;
+  return group;
+}
+
+/* ------------------- visualisation « réel » (overlay) --------------- */
+
+function buildOverlayForPlane(plane) {
+  const group = new THREE.Group();
+  const polygon = plane.polygon ?? [];
+  if (polygon.length < 3) return group;
+
+  const geometry = extrudePolygon(polygon, 0);
+  const color = overlayColor(plane.semanticLabel);
+
+  group.add(new THREE.Mesh(geometry, trackMaterial(overlayMaterials, new THREE.MeshBasicMaterial({
+    color, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
+  }), 'overlay')));
+  group.add(new THREE.LineSegments(new THREE.EdgesGeometry(geometry),
+    trackMaterial(overlayMaterials, new THREE.LineBasicMaterial({ color, opacity: 0.9 }), 'overlay')));
   if (plane.semanticLabel) group.add(makeLabelSprite(plane.semanticLabel, color));
-  return { group, mesh: fill };
+  return group;
+}
+
+function buildOverlayForMesh(geometry, label) {
+  const group = new THREE.Group();
+  const color = overlayColor(label || 'global mesh');
+  group.add(new THREE.Mesh(geometry, trackMaterial(overlayMaterials, new THREE.MeshBasicMaterial({
+    color, wireframe: true, opacity: 0.35,
+  }), 'overlay')));
+  return group;
 }
 
 function makeLabelSprite(text, color) {
@@ -377,81 +565,139 @@ function makeLabelSprite(text, color) {
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }));
+  const sprite = new THREE.Sprite(trackMaterial(overlayMaterials,
+    new THREE.SpriteMaterial({ map: texture, depthTest: false }), 'overlay'));
   sprite.scale.set(0.24, 0.06, 1);
   sprite.position.y = 0.05;
   return sprite;
 }
 
-function buildMeshVisual(xrMesh) {
-  const group = new THREE.Group();
-  const vertices = xrMesh.vertices ?? xrMesh.positions;
-  const indices = xrMesh.indices;
-  if (!vertices || !indices) return { group, mesh: null, tris: 0 };
+/* ----------------------- synchronisation du scan -------------------- */
 
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
-  geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-  geometry.computeVertexNormals();
-
-  const color = colorFor(xrMesh.semanticLabel || 'global mesh');
-  const surface = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
-    color, transparent: true, opacity: 0.07, side: THREE.DoubleSide,
-    depthWrite: false, blending: THREE.AdditiveBlending,
-  }));
-  const wire = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
-    color, wireframe: true, transparent: true, opacity: 0.38,
-  }));
-  group.add(surface, wire);
-  return { group, mesh: surface, tris: indices.length / 3 };
+function disposeItem(item) {
+  scanRoot.remove(item.group);
+  item.group.traverse((o) => {
+    o.geometry?.dispose();
+    const mats = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
+    for (const m of mats) {
+      m.dispose();
+      const i = twinMaterials.findIndex((e) => e.material === m); if (i >= 0) twinMaterials.splice(i, 1);
+      const j = overlayMaterials.findIndex((e) => e.material === m); if (j >= 0) overlayMaterials.splice(j, 1);
+    }
+  });
 }
 
-function syncDetected(frame, refSpace, detectedSet, entries, root, build, spaceKey) {
-  if (!detectedSet) return;
+function buildItem(xr, source, heightAboveFloor) {
+  const label = (xr.semanticLabel || (source === 'mesh' ? 'global mesh' : 'other')).toLowerCase();
+  const item = {
+    xr, source, label,
+    orientation: xr.orientation ?? null,
+    changed: xr.lastChangedTime,
+    group: new THREE.Group(),
+    tris: 0, area: 0,
+  };
+  item.kind = classify(label, item.orientation);
 
-  for (const [key, entry] of entries) {
-    if (!detectedSet.has(key)) {
-      root.remove(entry.group);
-      entry.group.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.(); });
-      entries.delete(key);
+  if (source === 'plane') {
+    item.area = polygonArea(xr.polygon ?? []);
+    item.overlay = buildOverlayForPlane(xr);
+    item.twin = buildTwinForPlane(xr, item.kind, heightAboveFloor);
+  } else {
+    const vertices = xr.vertices ?? xr.positions;
+    const indices = xr.indices;
+    if (vertices && indices) {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+      geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+      geometry.computeVertexNormals();
+      item.tris = indices.length / 3;
+      item.overlay = buildOverlayForMesh(geometry, label);
+      item.twin = buildTwinForMesh(geometry);
+    } else {
+      item.overlay = new THREE.Group();
+      item.twin = new THREE.Group();
     }
   }
 
-  for (const item of detectedSet) {
-    let entry = entries.get(item);
-    if (!entry || entry.changed !== item.lastChangedTime) {
-      if (entry) {
-        root.remove(entry.group);
-        entry.group.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.(); });
+  item.group.add(item.overlay, item.twin);
+  scanRoot.add(item.group);
+  return item;
+}
+
+function syncScan(frame, refSpace) {
+  const planes = frame.detectedPlanes;
+  const meshes = frame.detectedMeshes;
+
+  for (const [xr, item] of items) {
+    const stillThere = (item.source === 'plane' ? planes?.has(xr) : meshes?.has(xr));
+    if (!stillThere) { disposeItem(item); items.delete(xr); }
+  }
+
+  const consider = (set, source, spaceKey) => {
+    if (!set) return;
+    for (const xr of set) {
+      const pose = frame.getPose(xr[spaceKey], refSpace);
+      let item = items.get(xr);
+
+      // Le volume d'un meuble se déduit de la hauteur de son plateau
+      // au-dessus du sol : on attend donc la première pose valide.
+      if (!item && source === 'plane' && !pose) continue;
+
+      if (!item || item.changed !== xr.lastChangedTime) {
+        if (item) { disposeItem(item); items.delete(xr); }
+        item = buildItem(xr, source, pose ? pose.transform.position.y : 0);
+        items.set(xr, item);
       }
-      entry = build(item);
-      entry.changed = item.lastChangedTime;
-      entries.set(item, entry);
-      root.add(entry.group);
+      if (pose) {
+        item.group.visible = true;
+        item.group.matrix.fromArray(pose.transform.matrix);
+        item.group.matrix.decompose(item.group.position, item.group.quaternion, item.group.scale);
+      } else {
+        item.group.visible = false;
+      }
     }
-    const pose = frame.getPose(item[spaceKey], refSpace);
-    if (pose) { entry.group.visible = true; applyPose(entry.group, pose); }
-    else entry.group.visible = false;
+  };
+
+  consider(planes, 'plane', 'planeSpace');
+  consider(meshes, 'mesh', 'meshSpace');
+  updateInventory();
+}
+
+function updateInventory() {
+  inventory.byLabel.clear();
+  inventory.planes = inventory.meshes = inventory.tris = inventory.floorArea = 0;
+  for (const [, item] of items) {
+    if (item.source === 'plane') inventory.planes++; else inventory.meshes++;
+    inventory.tris += item.tris;
+    if (item.kind === 'floor') inventory.floorArea += item.area;
+    inventory.byLabel.set(item.label, (inventory.byLabel.get(item.label) ?? 0) + 1);
   }
 }
 
-function updateRoomModel(frame, refSpace) {
-  syncDetected(frame, refSpace, frame.detectedPlanes, planeEntries, planeRoot, buildPlaneVisual, 'planeSpace');
-  syncDetected(frame, refSpace, frame.detectedMeshes, meshEntries, meshRoot, buildMeshVisual, 'meshSpace');
+/* ==================== 4. bascule réel ↔ virtuel ===================== */
 
-  stats.planes = planeEntries.size;
-  stats.meshes = meshEntries.size;
-  stats.tris = 0;
-  stats.labels.clear();
-  for (const [plane] of planeEntries) if (plane.semanticLabel) stats.labels.add(plane.semanticLabel);
-  for (const [, entry] of meshEntries) stats.tris += entry.tris ?? 0;
+function updateBlend(dt) {
+  const target = mode === VIRTUAL ? 1 : 0;
+  if (blend === target) return;
+  const speed = dt / 0.9;
+  blend = target > blend ? Math.min(target, blend + speed) : Math.max(target, blend - speed);
+
+  dome.material.opacity = blend;
+  dome.visible = blend > 0.001;
+  for (const e of overlayMaterials) applyBlendToEntry(e);
+  for (const e of twinMaterials) applyBlendToEntry(e);
 }
+
+/* --------------------------- ancres, hit-test ---------------------- */
 
 function updateAnchors(frame, refSpace) {
   for (const [anchor, object] of anchorEntries) {
     const pose = frame.getPose(anchor.anchorSpace, refSpace);
-    if (pose) { object.visible = true; applyPose(object, pose); }
-    else object.visible = false;
+    if (pose) {
+      object.visible = true;
+      object.matrix.fromArray(pose.transform.matrix);
+      object.matrix.decompose(object.position, object.quaternion, object.scale);
+    } else object.visible = false;
   }
 }
 
@@ -471,7 +717,7 @@ function updateHitTest(frame, refSpace) {
   reticle.visible = false;
 }
 
-/* ------------- physique : rebond sur la géométrie réelle ------------ */
+/* ------------------------------ physique --------------------------- */
 
 const raycaster = new THREE.Raycaster();
 const GRAVITY = -9.81, RESTITUTION = 0.52, RADIUS = 0.045;
@@ -479,8 +725,11 @@ const step = new THREE.Vector3(), normal = new THREE.Vector3();
 
 function collisionTargets() {
   const targets = [];
-  for (const [, entry] of meshEntries)  if (entry.mesh && entry.group.visible) targets.push(entry.mesh);
-  for (const [, entry] of planeEntries) if (entry.mesh && entry.group.visible) targets.push(entry.mesh);
+  for (const [, item] of items) {
+    if (!item.group.visible) continue;
+    const collider = item.twin.userData.collider;
+    if (collider) targets.push(collider);
+  }
   return targets;
 }
 
@@ -535,12 +784,13 @@ function tick(time, frame) {
   if (frame) {
     const refSpace = renderer.xr.getReferenceSpace();
     if (refSpace) {
-      updateRoomModel(frame, refSpace);
+      syncScan(frame, refSpace);
       updateAnchors(frame, refSpace);
       updateHitTest(frame, refSpace);
     }
   }
 
+  updateBlend(dt);
   scene.updateMatrixWorld(true);
   updateBalls(dt);
 
@@ -550,11 +800,92 @@ function tick(time, frame) {
   renderer.render(scene, camera);
 }
 
+/* ============================ 5. export ============================= */
+
+function snapshotScan() {
+  const data = {
+    exportedAt: new Date().toISOString(),
+    features: inventory.features,
+    floorAreaM2: +inventory.floorArea.toFixed(3),
+    counts: Object.fromEntries(inventory.byLabel),
+    elements: [],
+  };
+  for (const [xr, item] of items) {
+    const el = {
+      source: item.source,
+      semanticLabel: item.label,
+      kind: item.kind,
+      orientation: item.orientation,
+      matrix: item.group.matrix.toArray(),
+    };
+    if (item.source === 'plane') {
+      el.areaM2 = +item.area.toFixed(4);
+      el.polygon = (xr.polygon ?? []).map((p) => [+p.x.toFixed(4), +p.y.toFixed(4), +p.z.toFixed(4)]);
+    } else {
+      el.triangleCount = item.tris;
+      el.vertexCount = (xr.vertices ?? xr.positions)?.length / 3 ?? 0;
+    }
+    data.elements.push(el);
+  }
+  return data;
+}
+
+let lastScan = null;
+
+function download(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+ui.dlJson.addEventListener('click', () => {
+  if (!lastScan) return;
+  download(new Blob([JSON.stringify(lastScan, null, 2)], { type: 'application/json' }), 'room-scan.json');
+});
+
+ui.dlGlb.addEventListener('click', async () => {
+  ui.dlGlb.disabled = true;
+  try {
+    const { GLTFExporter } = await import('three/addons/exporters/GLTFExporter.js');
+    const twin = new THREE.Group();
+    for (const [, item] of items) {
+      const clone = item.twin.clone(true);
+      clone.applyMatrix4(item.group.matrix);
+      twin.add(clone);
+    }
+    const glb = await new GLTFExporter().parseAsync(twin, { binary: true });
+    download(new Blob([glb], { type: 'model/gltf-binary' }), 'room-twin.glb');
+  } catch (err) {
+    log('Export GLB impossible : ' + err.message);
+  } finally {
+    ui.dlGlb.disabled = false;
+  }
+});
+
+function showReport() {
+  lastScan = snapshotScan();
+  const rows = [
+    ['Surface au sol', inventory.floorArea.toFixed(2) + ' m²'],
+    ['Plans détectés', String(inventory.planes)],
+    ['Maillages', `${inventory.meshes} (${inventory.tris.toLocaleString('fr-FR')} triangles)`],
+    ...[...inventory.byLabel.entries()].sort((a, b) => b[1] - a[1]).map(([l, n]) => [l, '× ' + n]),
+  ];
+  ui.inventory.innerHTML = rows
+    .map(([k, v]) => `<div class="row"><span class="k">${k}</span><span class="v">${v}</span></div>`)
+    .join('');
+  ui.report.classList.add('show');
+  ui.dlGlb.disabled = items.size === 0;
+  ui.dlJson.disabled = items.size === 0;
+}
+
 /* ------------------------------ session ---------------------------- */
 
 async function startSession() {
   ui.start.disabled = true;
   ui.status.textContent = 'Ouverture de la session…';
+  ui.report.classList.remove('show');
 
   try {
     const session = await navigator.xr.requestSession('immersive-ar', {
@@ -563,23 +894,25 @@ async function startSession() {
       domOverlay: { root: ui.root },
     });
 
-    stats.features = (session.enabledFeatures ?? []).filter((f) => f !== 'viewer' && f !== 'local-floor');
+    inventory.features = (session.enabledFeatures ?? []).filter((f) => f !== 'viewer' && f !== 'local-floor');
     ui.body.classList.add('xr-active');
-    ui.status.textContent = stats.features.length
-      ? 'Actif : ' + stats.features.join(', ')
+    ui.status.textContent = inventory.features.length
+      ? 'Actif : ' + inventory.features.join(', ')
       : 'Session active';
 
     session.addEventListener('end', () => {
+      showReport();
       ui.body.classList.remove('xr-active');
       ui.start.disabled = false;
-      ui.status.textContent = 'Session terminée.';
+      ui.status.textContent = 'Session terminée — scan conservé pour l\'export.';
       hitTestSource = null;
-      planeEntries.clear(); meshEntries.clear(); anchorEntries.clear();
-      planeRoot.clear(); meshRoot.clear();
+      mode = REAL; blend = 0;
       balls.splice(0).forEach((b) => scene.remove(b.mesh));
     });
 
     await renderer.xr.setSession(session);
+    renderer.xr.setFoveation(1.0);                 // netteté au centre, GPU économisé aux bords
+    renderer.xr.setFramebufferScaleFactor(1.0);
   } catch (err) {
     ui.start.disabled = false;
     ui.status.textContent = 'Échec : ' + err.message;
@@ -601,7 +934,7 @@ async function checkSupport() {
   }
   ui.start.disabled = false;
   ui.status.textContent = 'Réalité mixte disponible.';
-  log('Astuce : lance d\'abord le Space Setup du casque pour que la pièce soit scannée.');
+  log('Astuce : le Space Setup du casque doit être fait, c\'est lui qui fournit le scan.');
 }
 
 init();

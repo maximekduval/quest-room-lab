@@ -1,7 +1,22 @@
-# Quest Room Lab
+# Room Twin
 
-Prototype WebXR (Three.js) pour Meta Quest qui exploite la compréhension de la pièce
-du casque : plans sémantiques, maillage 3D, hit-test, ancres, passthrough.
+Prototype WebXR (Three.js) pour Meta Quest : lit le scan de la pièce, en construit
+un **jumeau virtuel fidèle à l'échelle 1:1**, et fait fondre le passthrough pour te
+laisser dans la version virtuelle de ton propre logement.
+
+## Le pipeline
+
+1. **Lecture** — plans sémantiques (`plane-detection`) + maillage 3D (`mesh-detection`)
+2. **Compréhension** — chaque élément est typé : structure (sol/mur/plafond),
+   ouverture (porte/fenêtre) ou volume (table/canapé/lit/rangement…)
+3. **Reconstruction** — les plans deviennent de la géométrie volumétrique : murs
+   extrudés en épaisseur, meubles extrudés de leur plateau jusqu'au sol
+4. **Bascule** — grip droit : fondu de 0,9 s du réel vers le virtuel. Un dôme opaque
+   masque le passthrough, la pièce virtuelle reste alignée au centimètre sur la vraie
+5. **Export** — `room-scan.json` (données brutes) et `room-twin.glb` (modèle 3D
+   ouvrable dans Blender)
+
+Trois styles pour le jumeau : Argile, Blueprint, Néon (grip gauche).
 
 ## Ce que ça fait
 
