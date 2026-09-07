@@ -97,6 +97,7 @@
         <button class="ghost" id="dl-glb">Télécharger le jumeau (.glb)</button>
         <button class="ghost" id="copy">Copier tout dans le presse-papier</button>
         <button class="ghost" id="cam-test">Tester l'accès caméra</button>
+        <button class="ghost" id="optics-test">Sonder l'optique (résolutions, stéréo)</button>
       </div>
       <div id="cam-result"></div>
       <textarea id="digest" readonly placeholder="Le scan complet apparaîtra ici à la sortie de session."></textarea>
@@ -183,6 +184,7 @@ const ui = {
   dlGlb: document.getElementById('dl-glb'),
   copy: document.getElementById('copy'),
   camTest: document.getElementById('cam-test'),
+  opticsTest: document.getElementById('optics-test'),
   camResult: document.getElementById('cam-result'),
   digest: document.getElementById('digest'),
 };
@@ -217,6 +219,10 @@ const caps = {
   cameraImageApi: null,           // XRWebGLBinding.getCameraImage disponible ?
   videoInputs: null,              // périphériques vidéo vus par getUserMedia
   probed: false,
+  plateforme: null,               // ce que le casque sait exécuter (WebGPU, WASM…)
+  optique: null,                  // résolutions atteignables, stéréo
+  calibration: null,              // focale, champ, retard du flux — mesurés
+  videoFrameMeta: null,           // horodatage fourni par le pipeline vidéo
 };
 const theme = () => THEMES[themeIndex];
 
@@ -279,13 +285,13 @@ function applyTheme() {
 
 function buildHud() {
   const canvas = document.createElement('canvas');
-  canvas.width = 512; canvas.height = 320;
+  canvas.width = 512; canvas.height = 384;
   hudCtx = canvas.getContext('2d');
   hudTexture = new THREE.CanvasTexture(canvas);
   hudTexture.colorSpace = THREE.SRGBColorSpace;
 
   hud = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.2, 0.125),
+    new THREE.PlaneGeometry(0.2, 0.15),
     new THREE.MeshBasicMaterial({ map: hudTexture, transparent: true })
   );
   hud.position.set(0, 0.05, -0.06);
@@ -295,7 +301,7 @@ function buildHud() {
 }
 
 function drawHud() {
-  const c = hudCtx, w = 512, h = 320;
+  const c = hudCtx, w = 512, h = 384;
   c.clearRect(0, 0, w, h);
   c.fillStyle = 'rgba(8,14,26,0.88)';
   c.beginPath(); c.roundRect(0, 0, w, h, 22); c.fill();
@@ -335,7 +341,15 @@ function drawHud() {
     c.fillText('Caméra : ' + (feed?.live ? 'en attente d\'image' : 'indisponible'), 26, 172);
   }
 
-  let y = 216;
+  // Calibration optique : elle tourne seule, on montre son avancement.
+  const cal = calib.result;
+  c.font = '400 15px system-ui, sans-serif';
+  c.fillStyle = cal ? '#6bff8a' : '#8ba0c2';
+  c.fillText(cal
+    ? `champ ${cal.champHorizontalDeg}° · retard ${cal.retardMs} ms · ±${cal.residuDeg}° (${cal.echantillons} éch.)`
+    : `calibration : ${calib.samples.length} éch. — tourne lentement la tête`, 26, 212);
+
+  let y = 240;
   const sorted = [...inventory.byLabel.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
   for (const [label, n] of sorted) {
     const col = overlayColor(label);
@@ -1257,6 +1271,28 @@ function updateHitTest(frame, refSpace) {
 let camStream = null, camVideo = null, camCanvas = null, camCtx = null;
 let camTexture = null, camPanel = null, camTimer = 0;
 let camDevices = [], camIndex = -1, axWasPressed = false;
+let lastFrameMeta = null, calibSolveCountdown = 0;
+
+// requestVideoFrameCallback est le seul moyen d'horodater une image
+// autrement qu'au moment où on la recopie. Se déclenche-t-il en session
+// immersive, où la page ne compose plus normalement ? À mesurer.
+function watchVideoFrames(video) {
+  if (!('requestVideoFrameCallback' in video)) return;
+  const step = (now, meta) => {
+    lastFrameMeta = meta;
+    caps.videoFrameMeta ??= {
+      champs: Object.keys(meta),
+      captureVersRappelMs: meta.captureTime != null ? +(now - meta.captureTime).toFixed(1) : null,
+      avanceAffichageMs: meta.expectedDisplayTime != null ? +(meta.expectedDisplayTime - now).toFixed(1) : null,
+      traitementMs: meta.processingDuration != null ? +(meta.processingDuration * 1000).toFixed(2) : null,
+      rappels: 0, rappelsEnSession: 0,
+    };
+    caps.videoFrameMeta.rappels++;
+    if (renderer.xr.getSession()) caps.videoFrameMeta.rappelsEnSession++;
+    if (camVideo === video) video.requestVideoFrameCallback(step);
+  };
+  video.requestVideoFrameCallback(step);
+}
 
 // Le Quest expose trois caméras. « facing front » regarde vers le visage
 // de l'utilisateur, à travers les lentilles : image floue, surexposée,
@@ -1296,6 +1332,7 @@ async function openCamera(constraints) {
   camVideo.srcObject = camStream;
   camVideo.muted = true; camVideo.playsInline = true;
   await camVideo.play();
+  watchVideoFrames(camVideo);
 
   buildCameraPanel();
   caps.cameraFeed = {
@@ -1368,9 +1405,7 @@ function stopCameraFeed() {
 // Une image noire et une image de la pièce se ressemblent dans un rapport
 // de bug. La luminance moyenne et son écart-type tranchent : un cadre noir
 // ou gelé n'a presque pas de variance.
-function measureLuma() {
-  const { width, height } = camCanvas;
-  const px = camCtx.getImageData(0, 0, width, height).data;
+function measureLuma(px) {
   let sum = 0, sumSq = 0, n = 0;
   for (let i = 0; i < px.length; i += 4 * 16) {          // un pixel sur seize
     const l = 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
@@ -1392,12 +1427,366 @@ function updateCameraFeed(dt) {
   camTexture.needsUpdate = true;
   if (camPanel) camPanel.visible = true;
 
-  const luma = measureLuma();
+  // Une seule lecture de pixels sert le diagnostic et la calibration.
+  const pixels = camCtx.getImageData(0, 0, camCanvas.width, camCanvas.height).data;
+  const luma = measureLuma(pixels);
   caps.cameraFeed.luma = luma;
   caps.cameraFeed.verdict = luma.std < 2 ? 'image uniforme (noire ou gelée)'
                           : luma.mean > 170 && luma.std < 20 ? 'claire et peu contrastée — probablement une optique interne'
                           : 'image contrastée — la caméra voit une scène';
   caps.cameraFeed.framesInSession = (caps.cameraFeed.framesInSession ?? 0) + 1;
+
+  // L'image est datée par le pipeline vidéo quand il le veut bien, puis
+  // ramenée dans l'horloge des XRFrame — sans quoi la comparaison aux
+  // poses de la tête n'aurait pas de sens.
+  const meta = lastFrameMeta;
+  const capture = meta && Math.abs(performance.now() - meta.captureTime) < 1000
+    ? meta.captureTime : performance.now();
+  pushCalibrationFrame(pixels, camCanvas.width, camCanvas.height,
+                       capture + (clockOffset ?? 0), meta?.presentedFrames ?? null);
+
+  if (++calibSolveCountdown >= 20) { calibSolveCountdown = 0; solveCalibration(); }
+}
+
+/* ==================== calibration optique ========================== *
+ *  getUserMedia ne livre ni intrinsèques ni pose. Les deux se mesurent.
+ *
+ *  La caméra est vissée au casque : une rotation de tête — que WebXR
+ *  donne au dixième de degré — déplace l'image d'un nombre de pixels
+ *  que l'on sait mesurer par corrélation. La pente pixels-par-radian
+ *  EST la distance focale ; le décalage temporel qui minimise la
+ *  dispersion du nuage EST la latence du flux vidéo.
+ *
+ *  Aucune mire, aucun clic, aucun réglage : il suffit de tourner la
+ *  tête lentement. La mesure tourne en tâche de fond dès que le flux
+ *  est vivant, et son résultat part dans l'export existant.
+ * =================================================================== */
+
+const POSE_LOG_SIZE = 256;                      // ~3 s à 90 Hz
+const LAGS_MS = [0, 20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 240, 280];
+const SHIFT_MAX = 40;                           // px explorés sur un profil de 320
+
+// Trois fenêtres horizontales symétriques : celle du centre donne la
+// focale, les flancs disent si l'objectif est rectilinéaire ou déformé.
+const H_WINDOWS = [
+  { i0: 40,  len: 100, offset: -70 },
+  { i0: 110, len: 100, offset: 0 },
+  { i0: 180, len: 100, offset: 70 },
+];
+const V_WINDOW = { i0: 60, len: 120, offset: 0 };
+
+const MIN_ANGLE = 1.5 * Math.PI / 180;          // sous 1,5°, la parallaxe domine
+const MAX_ANGLE = 14 * Math.PI / 180;           // au-delà, le décalage sature
+const MAX_ROLL = 4 * Math.PI / 180;
+const MAX_TRAVEL = 0.015;                       // 1,5 cm : au-delà, parallaxe
+const MIN_SCORE = 0.55;                         // corrélation normalisée minimale
+
+/* ------------------- journal des poses du viewer ------------------- */
+
+const poseLog = Array.from({ length: POSE_LOG_SIZE }, () => ({
+  t: -1, p: new THREE.Vector3(), q: new THREE.Quaternion(),
+}));
+let poseWrite = 0, poseFilled = 0;
+let headRate = 0;                               // rad/s, vitesse angulaire courante
+const headStats = { frames: 0, still: 0, sum: 0, max: 0 };
+
+// L'horloge des XRFrame et celle de performance.now() sont-elles la même ?
+// On le note plutôt que de le supposer : tout l'appariement en dépend.
+let clockOffset = null;
+
+function recordPose(frame, refSpace, time) {
+  if (clockOffset === null) clockOffset = time - performance.now();
+  const pose = frame.getViewerPose(refSpace);
+  if (!pose) return;
+
+  const slot = poseLog[poseWrite];
+  const { position, orientation } = pose.transform;
+  slot.t = time;
+  slot.p.set(position.x, position.y, position.z);
+  slot.q.set(orientation.x, orientation.y, orientation.z, orientation.w);
+
+  const previous = poseLog[(poseWrite + POSE_LOG_SIZE - 1) % POSE_LOG_SIZE];
+  poseWrite = (poseWrite + 1) % POSE_LOG_SIZE;
+  poseFilled = Math.min(poseFilled + 1, POSE_LOG_SIZE);
+
+  if (previous.t > 0 && slot.t > previous.t) {
+    const rel = previous.q.clone().invert().multiply(slot.q);
+    const angle = 2 * Math.acos(Math.min(1, Math.abs(rel.w)));
+    headRate = angle / ((slot.t - previous.t) / 1000);
+    headStats.frames++;
+    headStats.sum += headRate;
+    if (headRate < 10 * Math.PI / 180) headStats.still++;
+    if (headRate > headStats.max) headStats.max = headRate;
+  }
+}
+
+// Interpolation : à 90 Hz les poses sont à 11 ms d'écart, et la grille de
+// retards est à 20 ms. Prendre la plus proche introduirait une erreur du
+// même ordre que le signal cherché.
+function poseAt(t, out) {
+  let older = null, newer = null;
+  for (let k = 1; k <= poseFilled; k++) {
+    const e = poseLog[(poseWrite - k + POSE_LOG_SIZE) % POSE_LOG_SIZE];
+    if (e.t < 0) break;
+    if (e.t <= t) { older = e; break; }
+    newer = e;
+  }
+  if (!older || !newer) return null;
+  const span = newer.t - older.t;
+  const f = span > 1e-6 ? (t - older.t) / span : 0;
+  out.p.lerpVectors(older.p, newer.p, f);
+  out.q.slerpQuaternions(older.q, newer.q, f);
+  return out;
+}
+
+const motionA = { p: new THREE.Vector3(), q: new THREE.Quaternion() };
+const motionB = { p: new THREE.Vector3(), q: new THREE.Quaternion() };
+const relQuat = new THREE.Quaternion();
+const relEuler = new THREE.Euler();
+
+function relativeMotion(t0, t1, lagMs) {
+  const a = poseAt(t0 - lagMs, motionA);
+  const b = poseAt(t1 - lagMs, motionB);
+  if (!a || !b) return null;
+  relQuat.copy(a.q).invert().multiply(b.q);
+  relEuler.setFromQuaternion(relQuat, 'YXZ');
+  return { yaw: relEuler.y, pitch: relEuler.x, roll: relEuler.z, travel: a.p.distanceTo(b.p) };
+}
+
+/* ------------------- profils et corrélation ------------------------ */
+
+// Une variation d'exposition décale tout le profil : on ne garde que le
+// relief local, seul porteur de l'information de déplacement.
+function highpass(src, radius) {
+  const n = src.length, out = new Float32Array(n);
+  const prefix = new Float32Array(n + 1);
+  for (let i = 0; i < n; i++) prefix[i + 1] = prefix[i] + src[i];
+  for (let i = 0; i < n; i++) {
+    const a = Math.max(0, i - radius), b = Math.min(n, i + radius + 1);
+    out[i] = src[i] - (prefix[b] - prefix[a]) / (b - a);
+  }
+  return out;
+}
+
+function profileOf(px, w, h) {
+  const cols = new Float32Array(w), rows = new Float32Array(h);
+  for (let y = 0; y < h; y++) {
+    const base = y * w * 4;
+    let rowSum = 0;
+    for (let x = 0; x < w; x++) {
+      const i = base + x * 4;
+      const l = 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
+      cols[x] += l;
+      rowSum += l;
+    }
+    rows[y] = rowSum / w;
+  }
+  for (let x = 0; x < w; x++) cols[x] /= h;
+  return { cols: highpass(cols, 12), rows: highpass(rows, 12) };
+}
+
+// Corrélation normalisée de a[i0 … i0+len) contre b décalé de s, puis
+// affinage sous-pixel par parabole sur les trois points du pic.
+function bestShift(a, b, i0, len, max) {
+  const scores = new Float32Array(2 * max + 1);
+  let bestS = 0, bestScore = -Infinity;
+
+  for (let s = -max; s <= max; s++) {
+    let sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+    for (let k = 0; k < len; k++) {
+      const va = a[i0 + k], vb = b[i0 + k + s];
+      sa += va; sb += vb; saa += va * va; sbb += vb * vb; sab += va * vb;
+    }
+    const ca = saa - sa * sa / len, cb = sbb - sb * sb / len;
+    const score = (sab - sa * sb / len) / Math.sqrt(Math.max(1e-9, ca * cb));
+    scores[s + max] = score;
+    if (score > bestScore) { bestScore = score; bestS = s; }
+  }
+
+  const i = bestS + max;
+  let sub = 0;
+  if (i > 0 && i < 2 * max) {
+    const y0 = scores[i - 1], y1 = scores[i], y2 = scores[i + 1];
+    const curve = y0 - 2 * y1 + y2;
+    if (Math.abs(curve) > 1e-9) sub = 0.5 * (y0 - y2) / curve;
+    if (Math.abs(sub) > 1) sub = 0;
+  }
+  return { shift: bestS + sub, score: bestScore, saturated: Math.abs(bestS) === max };
+}
+
+/* ------------------------ accumulation ----------------------------- */
+
+const calib = {
+  samples: [], previous: null, result: null, frames: 0,
+  rejected: { duplicate: 0, correlation: 0, pose: 0 },
+};
+
+function resetCalibration() {
+  calib.samples.length = 0;
+  calib.previous = null;
+  calib.result = null;
+  calib.frames = 0;
+  calib.rejected = { duplicate: 0, correlation: 0, pose: 0 };
+  headStats.frames = headStats.still = headStats.sum = headStats.max = 0;
+}
+
+function pushCalibrationFrame(px, w, h, stamp, frameId) {
+  if (w !== 320 || h !== 240) return;           // les fenêtres visent ce format
+  const current = { t: stamp, id: frameId, ...profileOf(px, w, h) };
+  const previous = calib.previous;
+  calib.previous = current;
+  if (!previous) return;
+  calib.frames++;
+
+  // Une image répétée corrèle parfaitement à décalage nul et tirerait la
+  // focale vers l'infini : on l'écarte sur le compteur du pipeline vidéo.
+  if (frameId != null && previous.id === frameId) { calib.rejected.duplicate++; return; }
+  const dt = current.t - previous.t;
+  if (dt < 20 || dt > 400) { calib.rejected.duplicate++; return; }
+
+  const horizontal = H_WINDOWS.map((win) =>
+    bestShift(previous.cols, current.cols, win.i0, win.len, SHIFT_MAX));
+  const vertical = bestShift(previous.rows, current.rows, V_WINDOW.i0, V_WINDOW.len, SHIFT_MAX);
+  if (horizontal[1].score < MIN_SCORE && vertical.score < MIN_SCORE) {
+    calib.rejected.correlation++; return;
+  }
+
+  const lags = LAGS_MS.map((lag) => relativeMotion(previous.t, current.t, lag));
+  if (!lags.some(Boolean)) { calib.rejected.pose++; return; }
+
+  calib.samples.push({ h: horizontal, v: vertical, lags });
+  if (calib.samples.length > 500) calib.samples.shift();
+}
+
+/* --------------------------- résolution ---------------------------- */
+
+function medianOf(values) {
+  if (!values.length) return NaN;
+  const a = Float64Array.from(values).sort();
+  const m = a.length >> 1;
+  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+}
+
+// Pente robuste passant par l'origine : la médiane des rapports encaisse
+// les échantillons pollués par la parallaxe ou une corrélation douteuse.
+//
+// Hors du centre, la pente réelle dépend du sens de rotation — le contenu
+// d'une fenêtre latérale vient d'une zone plus ou moins étirée selon qu'on
+// tourne vers elle ou vers l'autre bord. Le nuage est alors bimodal et une
+// médiane globale se pose sur l'un des deux modes au hasard : sur scène
+// synthétique, elle rendait 0,96 à gauche et 0,86 à droite là où la
+// symétrie impose la même valeur. On médiane chaque sens séparément et on
+// en prend la moyenne, qui est symétrique par construction.
+function robustSlope(points, minimum = 8) {
+  if (points.length < minimum) return null;
+  const positive = points.filter((p) => p.x > 0), negative = points.filter((p) => p.x < 0);
+  const ratios = (list) => medianOf(list.map((p) => p.y / p.x));
+  const slope = (positive.length >= minimum / 3 && negative.length >= minimum / 3)
+    ? (ratios(positive) + ratios(negative)) / 2
+    : ratios(points);
+  if (!isFinite(slope)) return null;
+  return {
+    slope,
+    scatter: medianOf(points.map((p) => Math.abs(p.y - slope * p.x))),
+    n: points.length,
+  };
+}
+
+// Sous un modèle sténopé, une rotation de θ déplace le point d'abscisse x
+// de θ·(f + x²/f) : le déplacement grandit vers les bords. La corrélation
+// rend la moyenne de ce facteur sur sa fenêtre, donc une pente
+//     p = f + (centre² + longueur²/12) / f
+// systématiquement supérieure à f. On inverse cette parabole plutôt que
+// de publier une focale surestimée de 3 %. (Vérifié sur scène synthétique :
+// 155 px de vérité, 160,3 px de pente brute, 154,9 px après inversion.)
+function focalFromSlope(slope, offset, len) {
+  const spread = offset * offset + (len * len) / 12;
+  const disc = slope * slope - 4 * spread;
+  return disc > 0 ? (slope + Math.sqrt(disc)) / 2 : null;
+}
+
+function collectAtLag(lagIndex) {
+  const pts = { centre: [], left: [], right: [], vertical: [] };
+  const usable = (w) => w.score >= MIN_SCORE && !w.saturated;
+
+  for (const s of calib.samples) {
+    const m = s.lags[lagIndex];
+    if (!m || Math.abs(m.roll) > MAX_ROLL || m.travel > MAX_TRAVEL) continue;
+    const yaw = Math.abs(m.yaw), pitch = Math.abs(m.pitch);
+
+    if (yaw >= MIN_ANGLE && yaw <= MAX_ANGLE && pitch < 0.35 * yaw) {
+      const x = Math.tan(m.yaw);
+      if (usable(s.h[1])) pts.centre.push({ x, y: s.h[1].shift });
+      if (usable(s.h[0])) pts.left.push({ x, y: s.h[0].shift });
+      if (usable(s.h[2])) pts.right.push({ x, y: s.h[2].shift });
+    }
+    if (pitch >= MIN_ANGLE && pitch <= MAX_ANGLE && yaw < 0.35 * pitch && usable(s.v)) {
+      pts.vertical.push({ x: Math.tan(m.pitch), y: s.v.shift });
+    }
+  }
+  return pts;
+}
+
+function solveCalibration() {
+  const sweep = [];
+  let best = null;
+
+  for (let li = 0; li < LAGS_MS.length; li++) {
+    const pts = collectAtLag(li);
+    const centre = robustSlope(pts.centre, 12);
+    if (!centre || Math.abs(centre.slope) < 20) { sweep.push({ ms: LAGS_MS[li], n: pts.centre.length }); continue; }
+    // Dispersion rapportée à la focale : comparable d'un retard à l'autre.
+    const quality = centre.scatter / Math.abs(centre.slope);
+    sweep.push({ ms: LAGS_MS[li], n: centre.n, spread: +(quality * 1000).toFixed(2) });
+    if (!best || quality < best.quality) best = { li, quality, centre, pts };
+  }
+
+  if (!best) { calib.result = null; caps.calibration = { état: 'en cours', échantillons: calib.samples.length, balayage: sweep }; return null; }
+
+  const fx = focalFromSlope(Math.abs(best.centre.slope), H_WINDOWS[1].offset, H_WINDOWS[1].len);
+  if (!fx) { calib.result = null; return null; }
+  const vertical = robustSlope(best.pts.vertical, 8);
+  const fy = vertical ? focalFromSlope(Math.abs(vertical.slope), V_WINDOW.offset, V_WINDOW.len) : null;
+
+  // Les flancs, une fois la même inversion appliquée, rendent la même
+  // focale que le centre si l'objectif est rectilinéaire, et une focale
+  // plus courte s'il est fisheye — un fisheye étale l'angle uniformément
+  // là où un sténopé étire les bords. Références mesurées sur scène
+  // synthétique de vérité terrain, sur trois tirages : 0,89 à 1,01 pour
+  // un sténopé, 0,843 à 0,844 pour un fisheye équidistant de même champ.
+  // Indicateur réel mais étroit — l'arbitrage définitif reste la
+  // superposition du filaire de la pièce sur l'image.
+  const flankFocal = (fit, offset) => {
+    if (!fit) return null;
+    const f = focalFromSlope(Math.abs(fit.slope), offset, H_WINDOWS[0].len);
+    return f ? +(f / fx).toFixed(3) : null;
+  };
+
+  const result = {
+    retardMs: LAGS_MS[best.li],
+    focale320px: +fx.toFixed(1),
+    focale240px: fy ? +fy.toFixed(1) : null,
+    champHorizontalDeg: +(2 * Math.atan(160 / fx) * 180 / Math.PI).toFixed(1),
+    champVerticalDeg: fy ? +(2 * Math.atan(120 / fy) * 180 / Math.PI).toFixed(1) : null,
+    // Le signe encode l'orientation de l'image par rapport au lacet de la
+    // tête ; une image en miroir l'inverse. On le rapporte sans l'interpréter.
+    signePente: Math.sign(best.centre.slope),
+    dispersionPx: +best.centre.scatter.toFixed(2),
+    residuDeg: +(Math.atan(best.centre.scatter / fx) * 180 / Math.PI).toFixed(2),
+    echantillons: best.centre.n,
+    echantillonsVerticaux: vertical ? vertical.n : 0,
+    flancGauche: flankFocal(robustSlope(best.pts.left, 12), H_WINDOWS[0].offset),
+    flancDroit: flankFocal(robustSlope(best.pts.right, 12), H_WINDOWS[2].offset),
+    referenceRectilineaire: 0.95,           // sténopé parfait : 0,89–1,01 selon le tirage
+    referenceFisheye: 0.843,                // fisheye équidistant : très stable
+
+    balayageRetard: sweep,
+    imagesVues: calib.frames,
+    rejets: { ...calib.rejected },
+  };
+  calib.result = result;
+  caps.calibration = result;
+  return result;
 }
 
 /* ------------------- sonde d'accès aux caméras --------------------- */
@@ -1493,6 +1882,7 @@ function tick(time, frame) {
     const refSpace = renderer.xr.getReferenceSpace();
     if (refSpace) {
       probeCamera(frame, refSpace);
+      recordPose(frame, refSpace, time);
       syncScan(frame, refSpace);
       updateAnchors(frame, refSpace);
       updateHitTest(frame, refSpace);
@@ -1656,15 +2046,213 @@ ui.camTest.addEventListener('click', async () => {
   }
 });
 
+/* -------------------- sonde de plateforme -------------------------- *
+ *  Ce que le casque sait exécuter décide de l'architecture de la
+ *  vision : un modèle sur WebGPU, sur WASM SIMD, ou rien du tout.
+ *  GitHub Pages ne pose pas les en-têtes COOP/COEP, donc les threads
+ *  WASM sont probablement hors jeu — on le vérifie au lieu de le croire.
+ * =================================================================== */
+
+// Module minimal utilisant une instruction v128 : s'il valide, SIMD est là.
+const WASM_SIMD = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123,
+                                  3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]);
+
+async function probePlatform() {
+  const p = {
+    navigateur: navigator.userAgent,
+    contexteSecurise: isSecureContext,
+    crossOriginIsolated: self.crossOriginIsolated === true,   // requis pour les threads WASM
+    coeurs: navigator.hardwareConcurrency ?? null,
+    memoireGo: navigator.deviceMemory ?? null,
+    sharedArrayBuffer: typeof SharedArrayBuffer === 'function',
+    wasmSimd: (() => { try { return WebAssembly.validate(WASM_SIMD); } catch { return false; } })(),
+    offscreenCanvas: typeof OffscreenCanvas === 'function',
+    // Sans ce rappel, impossible d'horodater une image vidéo autrement
+    // qu'au moment où on la recopie — donc impossible de mesurer le retard.
+    requestVideoFrameCallback: typeof HTMLVideoElement !== 'undefined'
+      && 'requestVideoFrameCallback' in HTMLVideoElement.prototype,
+    webgpu: !!navigator.gpu,
+  };
+
+  try {
+    const gl = renderer.getContext();
+    const info = gl.getExtension('WEBGL_debug_renderer_info');
+    p.gpu = info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+    p.webgl2 = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext;
+    p.tailleTextureMax = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+  } catch { /* le contexte peut ne pas être prêt */ }
+
+  if (navigator.gpu) {
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      p.webgpuAdaptateur = adapter ? {
+        fonctions: [...adapter.features].slice(0, 24),
+        tamponMaxMo: Math.round((adapter.limits?.maxBufferSize ?? 0) / 1e6),
+        invocationsCalcul: adapter.limits?.maxComputeInvocationsPerWorkgroup ?? null,
+      } : 'aucun adaptateur';
+    } catch (err) { p.webgpuAdaptateur = 'erreur : ' + err.message; }
+  }
+  caps.plateforme = p;
+}
+
+/* ------------------- sonde optique hors session -------------------- *
+ *  Deux questions que seul un getUserMedia réel tranche : jusqu'où
+ *  monte la résolution, et les deux caméras « back » s'ouvrent-elles
+ *  ensemble — auquel cas la profondeur devient accessible par stéréo.
+ * =================================================================== */
+
+const RESOLUTION_LADDER = [[1920, 1080], [1600, 1200], [1280, 960], [1280, 720], [640, 480]];
+
+function grabProfile(video, w, h) {
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(video, 0, 0, w, h);
+  return { canvas, ...profileOf(ctx.getImageData(0, 0, w, h).data, w, h) };
+}
+
+async function openVideo(constraints) {
+  const stream = await navigator.mediaDevices.getUserMedia(constraints);
+  const video = document.createElement('video');
+  video.srcObject = stream;
+  video.muted = true; video.playsInline = true;
+  await video.play();
+  await new Promise((r) => setTimeout(r, 350));
+  return { stream, video, track: stream.getVideoTracks()[0] };
+}
+
+async function probeOptics(say) {
+  const report = { objectifs: [], stereo: null };
+  let opened = [];
+  const close = () => { opened.forEach((o) => { o.video.pause(); o.stream.getTracks().forEach((t) => t.stop()); }); opened = []; };
+
+  try {
+    say('1. Autorisation et énumération…');
+    const first = await openVideo({ video: { facingMode: { ideal: 'environment' } } });
+    opened.push(first);
+    const devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+    const world = devices.filter((d) => isWorldFacing(d.label));
+    say(`2. ${devices.length} caméra(s), dont ${world.length} tournée(s) vers la pièce.`);
+    close();
+
+    for (const device of (world.length ? world : devices)) {
+      const entry = { libelle: device.label || '(masqué)', formats: [] };
+      say(`3. Échelle de résolutions sur « ${entry.libelle} »…`);
+      for (const [w, h] of RESOLUTION_LADDER) {
+        try {
+          const open = await openVideo({ video: {
+            deviceId: { exact: device.deviceId },
+            width: { ideal: w }, height: { ideal: h },
+          } });
+          const s = open.track.getSettings();
+          entry.formats.push({ demande: `${w}×${h}`, obtenu: `${s.width}×${s.height}`, ips: s.frameRate ?? null });
+          if (!entry.capacites) {
+            const cap = open.track.getCapabilities?.() ?? null;
+            entry.capacites = cap ? JSON.parse(JSON.stringify(cap)) : 'getCapabilities absent';
+          }
+          open.video.pause(); open.stream.getTracks().forEach((t) => t.stop());
+        } catch (err) {
+          entry.formats.push({ demande: `${w}×${h}`, erreur: err.name });
+        }
+      }
+      const best = entry.formats.find((f) => f.obtenu);
+      say(`   → max ${best ? best.obtenu : 'aucun'} ` +
+          `(${entry.formats.filter((f) => f.obtenu).map((f) => f.obtenu).join(', ')})`);
+      report.objectifs.push(entry);
+    }
+
+    // Deux flux simultanés : la question qui ouvre — ou ferme — la stéréo.
+    if (world.length >= 2) {
+      say('4. Ouverture simultanée des deux caméras du monde…');
+      try {
+        const a = await openVideo({ video: { deviceId: { exact: world[0].deviceId }, width: { ideal: 640 }, height: { ideal: 480 } } });
+        opened.push(a);
+        const b = await openVideo({ video: { deviceId: { exact: world[1].deviceId }, width: { ideal: 640 }, height: { ideal: 480 } } });
+        opened.push(b);
+
+        const pa = grabProfile(a.video, 320, 240), pb = grabProfile(b.video, 320, 240);
+        const disparity = bestShift(pa.cols, pb.cols, H_WINDOWS[1].i0, H_WINDOWS[1].len, SHIFT_MAX);
+        report.stereo = {
+          simultane: true,
+          disparitePx320: +disparity.shift.toFixed(2),
+          correlation: +disparity.score.toFixed(3),
+          sature: disparity.saturated,
+        };
+        say(`   → les deux flux tiennent ensemble. Disparité horizontale ` +
+            `${disparity.shift.toFixed(1)} px (corrélation ${disparity.score.toFixed(2)}).`);
+        say('   Les deux vues ci-dessous : un léger glissement latéral entre elles signe une paire stéréo.');
+        ui.camResult.appendChild(pa.canvas);   // après le dernier say : il réécrit le bloc
+        ui.camResult.appendChild(pb.canvas);
+      } catch (err) {
+        report.stereo = { simultane: false, erreur: err.name, message: err.message };
+        say(`   → refus d'ouvrir les deux ensemble : ${err.name}. Pas de stéréo par ce chemin.`);
+      }
+      close();
+    } else {
+      report.stereo = { simultane: null, note: 'moins de deux caméras « back » énumérées' };
+    }
+  } catch (err) {
+    report.erreur = { nom: err.name ?? 'Error', message: err.message };
+    say(`ÉCHEC — ${err.name ?? 'Error'} : ${err.message}`);
+  } finally {
+    close();
+    caps.optique = report;
+    ui.digest.value = JSON.stringify({ capacites: caps, scan: lastScan }, null, 2);
+  }
+  return report;
+}
+
+ui.opticsTest.addEventListener('click', async () => {
+  const trace = [];
+  const say = (msg) => {
+    trace.push(msg);
+    const box = trace.map((t) => `<div>${t}</div>`).join('');
+    ui.camResult.innerHTML = box;
+    ui.camResult.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+  ui.opticsTest.disabled = true;
+  ui.camResult.className = 'active';
+  try { await probeOptics(say); } finally { ui.opticsTest.disabled = false; }
+});
+
 function showReport() {
   lastScan = snapshotScan();
+  solveCalibration();                       // dernière passe sur tout l'accumulé
+  const cal = calib.result;
+  const plat = caps.plateforme ?? {};
+  const vfc = caps.videoFrameMeta;
   const verdict = (v) => v === true ? 'oui' : v === false ? 'non' : (v ?? '—');
+  const deg = (v) => (v == null ? '—' : v + '°');
   const rows = [
     ['Accès caméra passthrough (WebXR)', caps.cameraAccessRequested ? 'ACCORDÉ' : 'refusé / non supporté'],
     ['Objet XRCamera exposé', caps.xrCamera ? `oui — ${caps.xrCamera.width}×${caps.xrCamera.height}` : verdict(caps.xrCamera)],
     ['XRWebGLBinding.getCameraImage', verdict(caps.cameraImageApi)],
     ['Périphériques vidéo visibles', caps.videoInputs === -1 ? 'énumération refusée' : String(caps.videoInputs ?? '—')],
     ['Features accordées', caps.features.join(', ') || '—'],
+    ['Horloge XRFrame − performance.now', clockOffset === null ? '—' : clockOffset.toFixed(1) + ' ms'],
+    ['Rappel par image vidéo (rVFC)', vfc
+      ? `${vfc.rappels} rappels, dont ${vfc.rappelsEnSession} en session`
+      : verdict(plat.requestVideoFrameCallback)],
+    ['Retard capture → rappel', vfc?.captureVersRappelMs != null ? vfc.captureVersRappelMs + ' ms' : 'non exposé'],
+    ['Retard du flux estimé', cal ? cal.retardMs + ' ms' : '—'],
+    ['Champ horizontal mesuré', cal ? deg(cal.champHorizontalDeg) : 'calibration incomplète'],
+    ['Champ vertical mesuré', cal ? deg(cal.champVerticalDeg) : '—'],
+    ['Résidu de reprojection', cal ? '± ' + cal.residuDeg + '°' : '—'],
+    ['Échantillons de calibration', cal ? `${cal.echantillons} lacet / ${cal.echantillonsVerticaux} tangage` : String(calib.samples.length)],
+    ['Distorsion — flancs / centre', cal && cal.flancDroit
+      ? `${cal.flancGauche ?? '—'} et ${cal.flancDroit} · sténopé 0,89–1,01 · fisheye 0,84`
+      : 'pas assez d\'échantillons'],
+    ['Tête quasi immobile (< 10°/s)', headStats.frames
+      ? Math.round(100 * headStats.still / headStats.frames) + ' % du temps' : '—'],
+    ['WebGPU', plat.webgpu ? (typeof plat.webgpuAdaptateur === 'object'
+      ? 'adaptateur obtenu' : String(plat.webgpuAdaptateur)) : verdict(plat.webgpu)],
+    ['WASM SIMD · threads', `${verdict(plat.wasmSimd)} · ${verdict(plat.sharedArrayBuffer && plat.crossOriginIsolated)}`],
+    ['GPU', plat.gpu ?? '—'],
+    ['Résolution caméra max', caps.optique?.objectifs?.[0]
+      ? (caps.optique.objectifs[0].formats.find((f) => f.obtenu)?.obtenu ?? '—')
+      : 'sonde non lancée'],
+    ['Deux caméras simultanées', caps.optique?.stereo
+      ? verdict(caps.optique.stereo.simultane) : 'sonde non lancée'],
     ['Surface au sol', inventory.floorArea.toFixed(2) + ' m²'],
     ['Plans détectés', String(inventory.planes)],
     ['Maillages', `${inventory.meshes} (${inventory.tris.toLocaleString('fr-FR')} triangles)`],
@@ -1692,6 +2280,7 @@ async function startSession() {
   const camOk = await startCameraFeed();
   ui.status.textContent = camOk ? 'Caméra obtenue, ouverture de la session…'
                                 : 'Sans caméra, ouverture de la session…';
+  resetCalibration();
 
   try {
     const session = await navigator.xr.requestSession('immersive-ar', {
@@ -1751,6 +2340,7 @@ async function checkSupport() {
 init();
 checkSupport();
 probeMediaDevices();
+probePlatform();
 ui.start.addEventListener('click', startSession);
 </script>
 </body>

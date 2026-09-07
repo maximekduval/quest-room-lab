@@ -50,8 +50,38 @@ pièce ; `facingMode: { ideal: 'environment' }` suffit à les obtenir. Les libel
 sont lisibles qu'après l'autorisation.
 
 Ce que `getUserMedia` ne fournit pas : les **intrinsèques et la pose** de la caméra
-dans le repère XR, indispensables pour reprojeter précisément une détection 2D sur
-le scan 3D.
+dans le repère XR. Ni l'une ni l'autre n'est fatale — les deux se mesurent.
+
+### Calibration optique : mesurée, pas supposée
+
+La caméra est vissée au casque. Une rotation de tête, que WebXR donne au dixième de
+degré, déplace donc l'image d'un nombre de pixels que la corrélation sait mesurer.
+La pente pixels-par-radian **est** la distance focale ; le décalage temporel qui
+minimise la dispersion du nuage **est** la latence du flux vidéo.
+
+La mesure tourne seule dès que le flux est vivant : il suffit de tourner lentement
+la tête, en lacet puis en tangage. Le HUD affiche l'avancement, le résultat part
+dans l'export existant. Aucune mire, aucun clic, aucun réglage.
+
+Le solveur est vérifié contre une vérité terrain synthétique (`scène panoramique,
+caméra sténopé de focale connue, flux volontairement retardé`) : il retrouve la
+focale à 0,4 % près, le retard au pas de la grille, avec un résidu de reprojection
+de 0,02°. Sur la même scène rendue en fisheye équidistant, le rapport
+flanc/centre passe de ~0,95 à 0,84 — de quoi trancher la nature de l'objectif.
+
+Ce que la calibration ne donne pas encore : la **rotation caméra→viewer**, trois
+angles constants qu'un recalage du filaire de la pièce sur l'image fixera d'un
+coup. La translation (~5 cm) vaut 1° de parallaxe à 3 m, sous le budget.
+
+### Sondes ajoutées
+
+- **« Sonder l'optique »** (page de rapport) : échelle de résolutions réellement
+  accordées par caméra, et surtout — les deux caméras « back » s'ouvrent-elles
+  **simultanément** ? Si oui, la profondeur devient accessible par stéréo.
+- **Sonde de plateforme** (au chargement) : WebGPU, WASM SIMD, threads,
+  `requestVideoFrameCallback`, GPU. C'est elle qui décide si un modèle de vision
+  peut tourner dans le casque. Note : GitHub Pages ne pose pas COOP/COEP, donc
+  `crossOriginIsolated` est faux et les threads WASM sont hors jeu.
 
 ## Commandes dans le casque
 
