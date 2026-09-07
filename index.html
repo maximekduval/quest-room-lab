@@ -323,15 +323,19 @@ function drawHud() {
   const feed = caps.cameraFeed;
   c.font = '400 17px system-ui, sans-serif';
   if (feed?.live && feed.luma) {
-    c.fillStyle = feed.luma.std < 2 ? '#ff8a3d' : '#6bff8a';
-    c.fillText(`Caméra : luma ${feed.luma.mean} ±${feed.luma.std} · ${feed.framesInSession ?? 0} img`,
-               26, 172);
+    c.fillStyle = feed.worldFacing ? '#6bff8a' : '#ff8a3d';
+    const nom = (feed.label || 'sans nom').replace(/,?\s*facing\s*/i, ' ▸ ');
+    c.fillText(`${nom}${camDevices.length > 1 ? ` (${camIndex + 1}/${camDevices.length})` : ''}`, 26, 168);
+    c.fillStyle = '#8ba0c2';
+    c.font = '400 15px system-ui, sans-serif';
+    c.fillText(`luma ${feed.luma.mean} ±${feed.luma.std} · ${feed.framesInSession ?? 0} img · A = suivante`,
+               26, 188);
   } else {
     c.fillStyle = '#8ba0c2';
     c.fillText('Caméra : ' + (feed?.live ? 'en attente d\'image' : 'indisponible'), 26, 172);
   }
 
-  let y = 202;
+  let y = 216;
   const sorted = [...inventory.byLabel.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
   for (const [label, n] of sorted) {
     const col = overlayColor(label);
@@ -1252,34 +1256,76 @@ function updateHitTest(frame, refSpace) {
 
 let camStream = null, camVideo = null, camCanvas = null, camCtx = null;
 let camTexture = null, camPanel = null, camTimer = 0;
+let camDevices = [], camIndex = -1, axWasPressed = false;
+
+// Le Quest expose trois caméras. « facing front » regarde vers le visage
+// de l'utilisateur, à travers les lentilles : image floue, surexposée,
+// avec les anneaux infrarouges. Ce sont les « facing back » qui voient
+// la pièce.
+const isWorldFacing = (label) => /back/i.test(label ?? '');
+
+function buildCameraPanel() {
+  if (camPanel) return;
+  camCanvas = document.createElement('canvas');
+  camCanvas.width = 320; camCanvas.height = 240;
+  camCtx = camCanvas.getContext('2d', { willReadFrequently: true });
+
+  camTexture = new THREE.CanvasTexture(camCanvas);
+  camTexture.colorSpace = THREE.SRGBColorSpace;
+  camPanel = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.16, 0.12),
+    new THREE.MeshBasicMaterial({ map: camTexture })
+  );
+  camPanel.position.set(0.15, 0.05, -0.06);   // à droite du HUD, sur la main gauche
+  camPanel.rotation.set(-0.95, 0, 0);
+  camPanel.visible = false;
+}
+
+function stopCameraStream() {
+  camStream?.getTracks().forEach((t) => t.stop());
+  if (camVideo) { camVideo.pause(); camVideo.srcObject = null; }
+  camStream = null; camVideo = null;
+}
+
+async function openCamera(constraints) {
+  stopCameraStream();
+  camStream = await navigator.mediaDevices.getUserMedia(constraints);
+  const track = camStream.getVideoTracks()[0];
+
+  camVideo = document.createElement('video');
+  camVideo.srcObject = camStream;
+  camVideo.muted = true; camVideo.playsInline = true;
+  await camVideo.play();
+
+  buildCameraPanel();
+  caps.cameraFeed = {
+    live: true, label: track.label, settings: track.getSettings(),
+    worldFacing: isWorldFacing(track.label), framesInSession: 0,
+  };
+  return track;
+}
 
 async function startCameraFeed() {
+  const size = { width: { ideal: 640 }, height: { ideal: 480 } };
   try {
-    camStream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 640 }, height: { ideal: 480 } },
-    });
-    const track = camStream.getVideoTracks()[0];
+    // Première tentative en demandant explicitement la caméra du monde.
+    let track = await openCamera({ video: { facingMode: { ideal: 'environment' }, ...size } });
 
-    camVideo = document.createElement('video');
-    camVideo.srcObject = camStream;
-    camVideo.muted = true; camVideo.playsInline = true;
-    await camVideo.play();
+    // Les libellés ne sont lisibles qu'une fois l'autorisation accordée :
+    // on énumère seulement maintenant, et on corrige si besoin.
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    camDevices = devices.filter((d) => d.kind === 'videoinput');
+    caps.cameras = camDevices.map((d) => d.label || '(libellé masqué)');
+    camIndex = camDevices.findIndex((d) => d.deviceId === track.getSettings().deviceId);
 
-    camCanvas = document.createElement('canvas');
-    camCanvas.width = 320; camCanvas.height = 240;
-    camCtx = camCanvas.getContext('2d', { willReadFrequently: true });
-
-    camTexture = new THREE.CanvasTexture(camCanvas);
-    camTexture.colorSpace = THREE.SRGBColorSpace;
-    camPanel = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.16, 0.12),
-      new THREE.MeshBasicMaterial({ map: camTexture })
-    );
-    camPanel.position.set(0.15, 0.05, -0.06);   // à droite du HUD, sur la main gauche
-    camPanel.rotation.set(-0.95, 0, 0);
-    camPanel.visible = false;
-
-    caps.cameraFeed = { live: true, label: track.label, settings: track.getSettings() };
+    if (!isWorldFacing(track.label)) {
+      const world = camDevices.findIndex((d) => isWorldFacing(d.label));
+      if (world >= 0) {
+        track = await openCamera({ video: { deviceId: { exact: camDevices[world].deviceId }, ...size } });
+        camIndex = world;
+        caps.cameraCorrected = 'bascule automatique vers ' + track.label;
+      }
+    }
     return true;
   } catch (err) {
     caps.cameraFeed = { live: false, error: err.name ?? 'Error', message: err.message };
@@ -1287,17 +1333,41 @@ async function startCameraFeed() {
   }
 }
 
-function stopCameraFeed() {
-  camStream?.getTracks().forEach((t) => t.stop());
-  if (camVideo) { camVideo.pause(); camVideo.srcObject = null; }
-  camStream = camVideo = camCanvas = camCtx = null;
-  if (camPanel) { camPanel.parent?.remove(camPanel); camPanel = null; }
-  camTexture?.dispose(); camTexture = null;
+async function cycleCamera() {
+  if (camDevices.length < 2) return;
+  camIndex = (camIndex + 1) % camDevices.length;
+  try {
+    await openCamera({ video: { deviceId: { exact: camDevices[camIndex].deviceId },
+                                width: { ideal: 640 }, height: { ideal: 480 } } });
+  } catch (err) {
+    caps.cameraFeed = { live: false, error: err.name, message: err.message };
+  }
 }
 
-// Une image noire et une image de la pièce se ressemblent dans un
-// rapport de bug. La luminance moyenne et son écart-type tranchent :
-// un cadre noir ou gelé n'a presque pas de variance.
+// Bouton A de la manette droite : caméra suivante. Le reste des commandes
+// est déjà pris, et une bascule manuelle permet d'identifier chaque objectif.
+function pollCameraButton() {
+  const session = renderer.xr.getSession();
+  if (!session) return;
+  for (const source of session.inputSources) {
+    if (source.handedness !== 'right' || !source.gamepad) continue;
+    const pressed = !!source.gamepad.buttons[4]?.pressed;
+    if (pressed && !axWasPressed) cycleCamera();
+    axWasPressed = pressed;
+  }
+}
+
+function stopCameraFeed() {
+  stopCameraStream();
+  if (camPanel) { camPanel.parent?.remove(camPanel); camPanel = null; }
+  camTexture?.dispose(); camTexture = null;
+  camCanvas = null; camCtx = null;
+  camDevices = []; camIndex = -1;
+}
+
+// Une image noire et une image de la pièce se ressemblent dans un rapport
+// de bug. La luminance moyenne et son écart-type tranchent : un cadre noir
+// ou gelé n'a presque pas de variance.
 function measureLuma() {
   const { width, height } = camCanvas;
   const px = camCtx.getImageData(0, 0, width, height).data;
@@ -1311,6 +1381,7 @@ function measureLuma() {
 }
 
 function updateCameraFeed(dt) {
+  pollCameraButton();
   if (!camVideo || !camCtx) return;
   camTimer += dt;
   if (camTimer < 0.1) return;                            // ~10 images par seconde
@@ -1324,8 +1395,8 @@ function updateCameraFeed(dt) {
   const luma = measureLuma();
   caps.cameraFeed.luma = luma;
   caps.cameraFeed.verdict = luma.std < 2 ? 'image uniforme (noire ou gelée)'
-                          : luma.mean < 6 ? 'quasiment noire'
-                          : 'image contrastée — la caméra voit quelque chose';
+                          : luma.mean > 170 && luma.std < 20 ? 'claire et peu contrastée — probablement une optique interne'
+                          : 'image contrastée — la caméra voit une scène';
   caps.cameraFeed.framesInSession = (caps.cameraFeed.framesInSession ?? 0) + 1;
 }
 
