@@ -63,15 +63,53 @@ La mesure tourne seule dès que le flux est vivant : il suffit de tourner lentem
 la tête, en lacet puis en tangage. Le HUD affiche l'avancement, le résultat part
 dans l'export existant. Aucune mire, aucun clic, aucun réglage.
 
-Le solveur est vérifié contre une vérité terrain synthétique (`scène panoramique,
-caméra sténopé de focale connue, flux volontairement retardé`) : il retrouve la
-focale à 0,4 % près, le retard au pas de la grille, avec un résidu de reprojection
-de 0,02°. Sur la même scène rendue en fisheye équidistant, le rapport
-flanc/centre passe de ~0,95 à 0,84 — de quoi trancher la nature de l'objectif.
+**On tourne la tête autour du cou, pas autour de l'œil.** Un lacet de 10° avec un
+pivot à 10 cm derrière déplace déjà la caméra de 1,7 cm, et cette translation
+gonfle la focale du facteur (1 + rayon / profondeur) — +3 % dans une pièce. Elle
+n'est donc pas filtrée mais **modélisée** : second régresseur dans l'ajustement, ce
+qui rend la **profondeur de scène mesurable** au passage. Rotation et translation
+sont quasi colinéaires tant qu'on ne fait que tourner la tête ; un pas de côté
+pendant la calibration les sépare. Le solveur signale lequel des deux régimes il a
+pu résoudre plutôt que de rendre une focale silencieusement biaisée.
+
+Le solveur est vérifié contre une vérité terrain synthétique — scène cylindrique à
+profondeur finie, caméra sténopé de focale connue, tête pivotant autour du cou,
+flux volontairement retardé de 80 ms :
+
+| | cou seul | cou + pas de côté | vérité |
+|---|---|---|---|
+| focale | 160,0 px *(biais annoncé)* | 154,8 px | 155 |
+| retard | 80 ms | 80 ms | 80 |
+| profondeur de scène | non séparable | 3,00 m | 3,0 |
+| rayon de rotation | 0,100 m | — | 0,10 |
+| résidu de reprojection | 0,03° | 0,03° | ~0 |
+
+Sur la même scène rendue en fisheye équidistant, le rapport flanc/centre tombe de
+~0,95 à 0,843 — de quoi trancher la nature de l'objectif.
 
 Ce que la calibration ne donne pas encore : la **rotation caméra→viewer**, trois
 angles constants qu'un recalage du filaire de la pièce sur l'image fixera d'un
 coup. La translation (~5 cm) vaut 1° de parallaxe à 3 m, sous le budget.
+
+### Ce que le casque a répondu
+
+Mesuré sur Quest 3, navigateur Oculus 150 :
+
+| | |
+|---|---|
+| `requestVideoFrameCallback` **en session immersive** | oui — 329 rappels sur 345 |
+| Retard capture → rappel, annoncé par le navigateur | 16,6 ms |
+| Capteur | **1280×1280** — `1600×1200` renvoie du `1200×1280` en portrait |
+| Meilleur format 4:3 servi | **1280×960 à 30 im/s** (et non 640×480) |
+| Champ horizontal mesuré | ~85°, à confirmer sans le biais de parallaxe |
+| Flancs / centre | 0,911 et 0,927 → **image rectilinéaire**, pas de fisheye |
+| Les deux caméras du monde **simultanément** | **oui** — disparité 3,81 px, corrélation 0,94 |
+| WebGPU | adaptateur Adreno 740, `shader-f16`, `subgroups`, 2 Go |
+| Threads WASM | non — `crossOriginIsolated` est faux sur GitHub Pages |
+| Cœurs annoncés | 3 |
+
+La stéréo est donc ouverte : base sur profondeur = 0,022, soit une base de ~6,5 cm
+pour une scène à 3 m — cohérent avec l'écartement des deux caméras RGB du casque.
 
 ### Sondes ajoutées
 

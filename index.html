@@ -341,16 +341,21 @@ function drawHud() {
     c.fillText('Caméra : ' + (feed?.live ? 'en attente d\'image' : 'indisponible'), 26, 172);
   }
 
-  // Calibration optique : elle tourne seule, on montre son avancement.
+  // Calibration optique : elle tourne seule, on montre son avancement et
+  // le geste qui manque encore.
   const cal = calib.result;
   c.font = '400 15px system-ui, sans-serif';
   c.fillStyle = cal ? '#6bff8a' : '#8ba0c2';
   c.fillText(cal
     ? `champ ${cal.champHorizontalDeg}° · retard ${cal.retardMs} ms · ±${cal.residuDeg}° (${cal.echantillons} éch.)`
     : `calibration : ${calib.samples.length} éch. — tourne lentement la tête`, 26, 212);
+  c.fillStyle = '#ffc247';
+  c.font = '400 14px system-ui, sans-serif';
+  c.fillText(calibrationHint(), 26, 232);
 
-  let y = 240;
-  const sorted = [...inventory.byLabel.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
+  let y = 256;
+  c.font = '400 17px system-ui, sans-serif';
+  const sorted = [...inventory.byLabel.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
   for (const [label, n] of sorted) {
     const col = overlayColor(label);
     c.fillStyle = '#' + col.toString(16).padStart(6, '0');
@@ -1342,8 +1347,13 @@ async function openCamera(constraints) {
   return track;
 }
 
+// Le capteur rend 1280×1280 au maximum : demander 1600×1200 renvoie du
+// 1200×1280 en portrait. 1280×960 est le plus grand format 4:3 servi, à
+// 30 im/s — quatre fois les pixels de 640×480, pour la reconnaissance.
+const CAPTURE = { width: { ideal: 1280 }, height: { ideal: 960 } };
+
 async function startCameraFeed() {
-  const size = { width: { ideal: 640 }, height: { ideal: 480 } };
+  const size = CAPTURE;
   try {
     // Première tentative en demandant explicitement la caméra du monde.
     let track = await openCamera({ video: { facingMode: { ideal: 'environment' }, ...size } });
@@ -1374,8 +1384,7 @@ async function cycleCamera() {
   if (camDevices.length < 2) return;
   camIndex = (camIndex + 1) % camDevices.length;
   try {
-    await openCamera({ video: { deviceId: { exact: camDevices[camIndex].deviceId },
-                                width: { ideal: 640 }, height: { ideal: 480 } } });
+    await openCamera({ video: { deviceId: { exact: camDevices[camIndex].deviceId }, ...CAPTURE } });
   } catch (err) {
     caps.cameraFeed = { live: false, error: err.name, message: err.message };
   }
@@ -1463,7 +1472,7 @@ function updateCameraFeed(dt) {
  * =================================================================== */
 
 const POSE_LOG_SIZE = 256;                      // ~3 s à 90 Hz
-const LAGS_MS = [0, 20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 240, 280];
+const LAGS_MS = [0, 20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300, 320];
 const SHIFT_MAX = 40;                           // px explorés sur un profil de 320
 
 // Trois fenêtres horizontales symétriques : celle du centre donne la
@@ -1475,10 +1484,15 @@ const H_WINDOWS = [
 ];
 const V_WINDOW = { i0: 60, len: 120, offset: 0 };
 
-const MIN_ANGLE = 1.5 * Math.PI / 180;          // sous 1,5°, la parallaxe domine
+const MIN_ANGLE = 1.2 * Math.PI / 180;
 const MAX_ANGLE = 14 * Math.PI / 180;           // au-delà, le décalage sature
 const MAX_ROLL = 4 * Math.PI / 180;
-const MAX_TRAVEL = 0.015;                       // 1,5 cm : au-delà, parallaxe
+// On tourne la tête autour du cou, pas autour de l'œil : un lacet de 10°
+// avec un pivot à 10 cm derrière déplace déjà la caméra de 1,7 cm. Filtrer
+// cette translation revenait à jeter le mouvement normal — sur casque,
+// 13 échantillons utiles sur 111 images, et les survivants biaisés. On la
+// laisse passer et on la met dans l'ajustement comme second régresseur.
+const MAX_TRAVEL = 0.08;                        // au-delà, c'est de la marche
 const MIN_SCORE = 0.55;                         // corrélation normalisée minimale
 
 /* ------------------- journal des poses du viewer ------------------- */
@@ -1544,13 +1558,21 @@ const motionB = { p: new THREE.Vector3(), q: new THREE.Quaternion() };
 const relQuat = new THREE.Quaternion();
 const relEuler = new THREE.Euler();
 
+const relShift = new THREE.Vector3();
+
 function relativeMotion(t0, t1, lagMs) {
   const a = poseAt(t0 - lagMs, motionA);
   const b = poseAt(t1 - lagMs, motionB);
   if (!a || !b) return null;
   relQuat.copy(a.q).invert().multiply(b.q);
   relEuler.setFromQuaternion(relQuat, 'YXZ');
-  return { yaw: relEuler.y, pitch: relEuler.x, roll: relEuler.z, travel: a.p.distanceTo(b.p) };
+  // Déplacement ramené dans le repère de la caméra au premier instant :
+  // c'est sa composante latérale qui produit la parallaxe horizontale.
+  relShift.subVectors(b.p, a.p).applyQuaternion(motionA.q.clone().invert());
+  return {
+    yaw: relEuler.y, pitch: relEuler.x, roll: relEuler.z,
+    travel: a.p.distanceTo(b.p), lateral: relShift.x, vertical: relShift.y,
+  };
 }
 
 /* ------------------- profils et corrélation ------------------------ */
@@ -1620,6 +1642,17 @@ const calib = {
   samples: [], previous: null, result: null, frames: 0,
   rejected: { duplicate: 0, correlation: 0, pose: 0 },
 };
+
+// Le premier passage sur casque n'a rendu aucun échantillon vertical :
+// on panote naturellement en lacet et jamais en tangage. La consigne
+// réclame donc explicitement le geste manquant.
+function calibrationHint() {
+  const cal = calib.result;
+  if (!cal) return 'gauche-droite, puis haut-bas, lentement';
+  if (cal.echantillonsVerticaux < 20) return '↕ hoche la tête de haut en bas';
+  if (cal.modele === '1p') return '↔ déplace-toi de côté pour séparer la parallaxe';
+  return 'calibration établie';
+}
 
 function resetCalibration() {
   calib.samples.length = 0;
@@ -1708,6 +1741,7 @@ function focalFromSlope(slope, offset, len) {
 function collectAtLag(lagIndex) {
   const pts = { centre: [], left: [], right: [], vertical: [] };
   const usable = (w) => w.score >= MIN_SCORE && !w.saturated;
+  const necks = [];
 
   for (const s of calib.samples) {
     const m = s.lags[lagIndex];
@@ -1715,16 +1749,73 @@ function collectAtLag(lagIndex) {
     const yaw = Math.abs(m.yaw), pitch = Math.abs(m.pitch);
 
     if (yaw >= MIN_ANGLE && yaw <= MAX_ANGLE && pitch < 0.35 * yaw) {
-      const x = Math.tan(m.yaw);
-      if (usable(s.h[1])) pts.centre.push({ x, y: s.h[1].shift });
-      if (usable(s.h[0])) pts.left.push({ x, y: s.h[0].shift });
-      if (usable(s.h[2])) pts.right.push({ x, y: s.h[2].shift });
+      const x = Math.tan(m.yaw), t = m.lateral;
+      // Déport latéral par radian de lacet : c'est très exactement ce qui
+      // gonfle la focale quand on ne sait pas séparer les deux causes.
+      // À ne mesurer que sur du lacet — mêler lacet et tangage donne une
+      // médiane qui ne veut rien dire (0,002 m au banc, pour 0,10 réel).
+      necks.push(Math.abs(t / m.yaw));
+      if (usable(s.h[1])) pts.centre.push({ x, t, y: s.h[1].shift });
+      if (usable(s.h[0])) pts.left.push({ x, t, y: s.h[0].shift });
+      if (usable(s.h[2])) pts.right.push({ x, t, y: s.h[2].shift });
     }
     if (pitch >= MIN_ANGLE && pitch <= MAX_ANGLE && yaw < 0.35 * pitch && usable(s.v)) {
-      pts.vertical.push({ x: Math.tan(m.pitch), y: s.v.shift });
+      pts.vertical.push({ x: Math.tan(m.pitch), t: m.vertical, y: s.v.shift });
     }
   }
+  // Rayon de rotation effectif : ~0,10 m si l'on pivote bien du cou.
+  pts.neckRadius = necks.length >= 8 ? medianOf(necks) : null;
+  if (!(pts.neckRadius >= 0)) pts.neckRadius = null;
   return pts;
+}
+
+// Deux causes déplacent l'image : la rotation (pente = focale) et la
+// translation latérale (pente = focale / profondeur). On les ajuste
+// ensemble, ce qui rend la profondeur de scène mesurable au passage —
+// à condition qu'elles ne soient pas colinéaires. Or la rotation du cou
+// les rend presque colinéaires : d'où le garde-fou sur la corrélation
+// des régresseurs, et le repli sur l'ajustement à un seul paramètre.
+function fit2(points, trim = true) {
+  let Saa = 0, Sab = 0, Sbb = 0, Say = 0, Sby = 0;
+  for (const p of points) {
+    Saa += p.x * p.x; Sab += p.x * p.t; Sbb += p.t * p.t;
+    Say += p.x * p.y; Sby += p.t * p.y;
+  }
+  const correlation = Math.abs(Sab) / Math.sqrt(Math.max(1e-12, Saa * Sbb));
+  const det = Saa * Sbb - Sab * Sab;
+  if (!(correlation < 0.9) || Math.abs(det) < 1e-12) return { collinear: true, correlation };
+
+  const slope = (Sbb * Say - Sab * Sby) / det;
+  const parallax = (Saa * Sby - Sab * Say) / det;
+  const residual = (p) => Math.abs(p.y - slope * p.x - parallax * p.t);
+
+  // Un seul passage d'élagage — sans quoi la récursion raboterait tout
+  // jeu de données jusqu'au minimum. On retire le cinquième le plus mal
+  // expliqué pour que deux corrélations douteuses ne fixent pas la focale.
+  if (trim && points.length >= 16) {
+    const kept = points.map((p) => ({ p, r: residual(p) }))
+      .sort((u, v) => u.r - v.r)
+      .slice(0, Math.round(points.length * 0.8))
+      .map((u) => u.p);
+    const refined = fit2(kept, false);
+    if (refined && !refined.collinear) return { ...refined, n: points.length, trimmed: true };
+  }
+  return {
+    slope, parallax, correlation, n: points.length, mode: '2p',
+    scatter: medianOf(points.map(residual)),
+    depth: Math.abs(parallax) > 1e-6 ? Math.abs(slope / parallax) : null,
+  };
+}
+
+// L'ajustement à deux paramètres quand la géométrie le permet, la pente
+// robuste sinon. Dans le second cas la focale reste gonflée du facteur
+// (1 + rayon de rotation / profondeur) — signalé, pas caché.
+function fitAxis(points, minimum = 10) {
+  if (points.length < minimum) return null;
+  const two = fit2(points);
+  if (two && !two.collinear) return two;
+  const one = robustSlope(points, minimum);
+  return one && { ...one, mode: '1p', correlation: two?.correlation ?? null, depth: null };
 }
 
 function solveCalibration() {
@@ -1733,19 +1824,26 @@ function solveCalibration() {
 
   for (let li = 0; li < LAGS_MS.length; li++) {
     const pts = collectAtLag(li);
-    const centre = robustSlope(pts.centre, 12);
-    if (!centre || Math.abs(centre.slope) < 20) { sweep.push({ ms: LAGS_MS[li], n: pts.centre.length }); continue; }
+    const centre = fitAxis(pts.centre);
+    if (!centre || Math.abs(centre.slope) < 20) {
+      sweep.push({ ms: LAGS_MS[li], n: pts.centre.length });
+      continue;
+    }
     // Dispersion rapportée à la focale : comparable d'un retard à l'autre.
     const quality = centre.scatter / Math.abs(centre.slope);
-    sweep.push({ ms: LAGS_MS[li], n: centre.n, spread: +(quality * 1000).toFixed(2) });
+    sweep.push({ ms: LAGS_MS[li], n: centre.n, dispersion: +(quality * 1000).toFixed(2), modele: centre.mode });
     if (!best || quality < best.quality) best = { li, quality, centre, pts };
   }
 
-  if (!best) { calib.result = null; caps.calibration = { état: 'en cours', échantillons: calib.samples.length, balayage: sweep }; return null; }
+  if (!best) {
+    calib.result = null;
+    caps.calibration = { état: 'en cours', échantillons: calib.samples.length, balayage: sweep };
+    return null;
+  }
 
   const fx = focalFromSlope(Math.abs(best.centre.slope), H_WINDOWS[1].offset, H_WINDOWS[1].len);
   if (!fx) { calib.result = null; return null; }
-  const vertical = robustSlope(best.pts.vertical, 8);
+  const vertical = fitAxis(best.pts.vertical, 8);
   const fy = vertical ? focalFromSlope(Math.abs(vertical.slope), V_WINDOW.offset, V_WINDOW.len) : null;
 
   // Les flancs, une fois la même inversion appliquée, rendent la même
@@ -1761,6 +1859,7 @@ function solveCalibration() {
     const f = focalFromSlope(Math.abs(fit.slope), offset, H_WINDOWS[0].len);
     return f ? +(f / fx).toFixed(3) : null;
   };
+  const neck = best.pts.neckRadius;
 
   const result = {
     retardMs: LAGS_MS[best.li],
@@ -1771,15 +1870,24 @@ function solveCalibration() {
     // Le signe encode l'orientation de l'image par rapport au lacet de la
     // tête ; une image en miroir l'inverse. On le rapporte sans l'interpréter.
     signePente: Math.sign(best.centre.slope),
+    modele: best.centre.mode,
+    correlationRegresseurs: best.centre.correlation != null ? +best.centre.correlation.toFixed(3) : null,
+    profondeurSceneM: best.centre.depth ? +best.centre.depth.toFixed(2) : null,
+    rayonRotationM: neck ? +neck.toFixed(3) : null,
+    // En mode 1p, rotation et translation restent confondues et la focale
+    // est surestimée du facteur rayon/profondeur. Faute de profondeur
+    // mesurée, on la chiffre à 3 m — ordre de grandeur d'une pièce.
+    // Un pas de côté pendant la calibration lève l'ambiguïté.
+    biaisEstime: (best.centre.mode === '1p' && neck) ? +(neck / 3).toFixed(3) : null,
     dispersionPx: +best.centre.scatter.toFixed(2),
     residuDeg: +(Math.atan(best.centre.scatter / fx) * 180 / Math.PI).toFixed(2),
     echantillons: best.centre.n,
     echantillonsVerticaux: vertical ? vertical.n : 0,
-    flancGauche: flankFocal(robustSlope(best.pts.left, 12), H_WINDOWS[0].offset),
-    flancDroit: flankFocal(robustSlope(best.pts.right, 12), H_WINDOWS[2].offset),
+    flancGauche: flankFocal(fitAxis(best.pts.left, 12), H_WINDOWS[0].offset),
+    flancDroit: flankFocal(fitAxis(best.pts.right, 12), H_WINDOWS[2].offset),
     referenceRectilineaire: 0.95,           // sténopé parfait : 0,89–1,01 selon le tirage
     referenceFisheye: 0.843,                // fisheye équidistant : très stable
-
+    horlogeXRms: clockOffset === null ? null : +clockOffset.toFixed(1),
     balayageRetard: sweep,
     imagesVues: calib.frames,
     rejets: { ...calib.rejected },
@@ -2239,6 +2347,13 @@ function showReport() {
     ['Champ vertical mesuré', cal ? deg(cal.champVerticalDeg) : '—'],
     ['Résidu de reprojection', cal ? '± ' + cal.residuDeg + '°' : '—'],
     ['Échantillons de calibration', cal ? `${cal.echantillons} lacet / ${cal.echantillonsVerticaux} tangage` : String(calib.samples.length)],
+    ['Modèle d\'ajustement', cal
+      ? (cal.modele === '2p'
+          ? `rotation et parallaxe séparées (r = ${cal.correlationRegresseurs})`
+          : `confondues (r = ${cal.correlationRegresseurs}) — focale surestimée`)
+      : '—'],
+    ['Profondeur de scène mesurée', cal?.profondeurSceneM ? cal.profondeurSceneM + ' m' : 'non séparable'],
+    ['Rayon de rotation de la tête', cal?.rayonRotationM ? cal.rayonRotationM + ' m' : '—'],
     ['Distorsion — flancs / centre', cal && cal.flancDroit
       ? `${cal.flancGauche ?? '—'} et ${cal.flancDroit} · sténopé 0,89–1,01 · fisheye 0,84`
       : 'pas assez d\'échantillons'],
