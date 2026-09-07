@@ -131,21 +131,21 @@ const THEMES = [
     name: 'Argile',
     sky: 0x1b2436, fog: 0x1b2436,
     floor: 0xb9c4d4, wall: 0xdfe6ef, ceiling: 0x9fadc0,
-    furniture: 0xf2b06a, opening: 0x9fe8ff, mesh: 0xa8b6cb,
+    furniture: 0xf2b06a, furnitureAccent: 0xd8894a, opening: 0x9fe8ff, mesh: 0xa8b6cb,
     edges: 0x2c3a4e, wire: false,
   },
   {
     name: 'Blueprint',
     sky: 0x040a1c, fog: 0x040a1c,
     floor: 0x0d2a52, wall: 0x123a6e, ceiling: 0x0a2244,
-    furniture: 0x1d5aa0, opening: 0x7cf3ff, mesh: 0x1a4c8c,
+    furniture: 0x1d5aa0, furnitureAccent: 0x2f7fd4, opening: 0x7cf3ff, mesh: 0x1a4c8c,
     edges: 0x7cf3ff, wire: true,
   },
   {
     name: 'Néon',
     sky: 0x0a0418, fog: 0x0a0418,
     floor: 0x1a0b34, wall: 0x220d3f, ceiling: 0x140828,
-    furniture: 0x3a1263, opening: 0xff6bd6, mesh: 0x2a0f4a,
+    furniture: 0x3a1263, furnitureAccent: 0x6a2bb0, opening: 0xff6bd6, mesh: 0x2a0f4a,
     edges: 0xff6bd6, wire: false,
   },
 ];
@@ -558,7 +558,206 @@ function buildTwinForMesh(geometry, role) {
   }), role, { isSurface: true }));
   group.add(surface);
   group.userData.collider = surface;
+  group.userData.surface = surface;
   return group;
+}
+
+/* ================= mobilier procédural paramétré =================== *
+ *  Chaque meuble est généré en code aux dimensions réelles de sa boîte,
+ *  dans un repère canonique : origine au centre de la base, +Y vers le
+ *  haut, +X la largeur, +Z la profondeur (le dos d'un meuble est en -Z).
+ * =================================================================== */
+
+function boxPart(w, h, d, x, y, z, material) {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+  mesh.position.set(x, y, z);
+  return mesh;
+}
+
+const FURNITURE = {
+  couch(w, h, d, m) {
+    const g = new THREE.Group();
+    const seat = h * 0.42, back = d * 0.24, arm = Math.min(w * 0.12, 0.16);
+    g.add(boxPart(w, seat, d, 0, seat / 2, 0, m.body));
+    g.add(boxPart(w, h, back, 0, h / 2, -d / 2 + back / 2, m.body));
+    for (const sx of [-1, 1]) g.add(boxPart(arm, h * 0.62, d, sx * (w - arm) / 2, h * 0.31, 0, m.body));
+    const span = w - 2 * arm, n = span > 1.4 ? 3 : 2;
+    if (span > 0.05) for (let i = 0; i < n; i++) {
+      g.add(boxPart(span / n * 0.9, h * 0.14, Math.max(0.02, d - back) * 0.9,
+        -span / 2 + span / n * (i + 0.5), seat + h * 0.07, back / 2, m.accent));
+    }
+    return g;
+  },
+
+  table(w, h, d, m) {
+    const g = new THREE.Group();
+    const top = Math.min(h * 0.12, 0.05);
+    const leg = Math.min(Math.max(0.03, Math.min(w, d) * 0.08), Math.min(w, d) / 2);
+    g.add(boxPart(w, top, d, 0, h - top / 2, 0, m.body));
+    for (const sx of [-1, 1]) for (const sz of [-1, 1])
+      g.add(boxPart(leg, h - top, leg, sx * (w / 2 - leg), (h - top) / 2, sz * (d / 2 - leg), m.accent));
+    return g;
+  },
+
+  shelf(w, h, d, m) {
+    const g = new THREE.Group();
+    const board = Math.min(h * 0.5, 0.035, w / 2, d);
+    if (h < 0.3) {                                   // simple tablette murale
+      g.add(boxPart(w, board, d, 0, h - board / 2, 0, m.body));
+      const bx = Math.max(0, w / 2 - board * 2);
+      for (const sx of [-1, 1])
+        g.add(boxPart(board, h - board, d * 0.7, sx * bx, (h - board) / 2, 0, m.accent));
+      return g;
+    }
+    const levels = Math.max(2, Math.round(h / 0.36));  // bibliothèque
+    for (let i = 0; i <= levels; i++)
+      g.add(boxPart(w, board, d, 0, board / 2 + (h - board) * (i / levels), 0, m.body));
+    for (const sx of [-1, 1]) g.add(boxPart(board, h, d, sx * (w - board) / 2, h / 2, 0, m.accent));
+    g.add(boxPart(w, h, board * 0.6, 0, h / 2, -d / 2 + board * 0.3, m.accent));
+    return g;
+  },
+
+  bed(w, h, d, m) {
+    const g = new THREE.Group();
+    const base = h * 0.5;
+    g.add(boxPart(w, base, d, 0, base / 2, 0, m.accent));
+    g.add(boxPart(w * 0.98, h * 0.36, d * 0.96, 0, base + h * 0.18, 0, m.body));
+    g.add(boxPart(w * 0.42, h * 0.14, d * 0.16, 0, h * 0.93, -d / 2 + d * 0.12, m.accent));
+    g.add(boxPart(w, h * 0.7, 0.04, 0, h * 0.35, -d / 2 + 0.02, m.accent));
+    return g;
+  },
+
+  storage(w, h, d, m) {
+    const g = new THREE.Group();
+    g.add(boxPart(w, h, d, 0, h / 2, 0, m.body));
+    for (const sx of [-1, 1]) {
+      g.add(boxPart(w / 2 * 0.94, h * 0.94, 0.02, sx * w / 4, h / 2, d / 2 - 0.01, m.accent));
+      g.add(boxPart(Math.min(0.02, w * 0.06), h * 0.18, 0.012, sx * Math.min(0.04, w * 0.12), h / 2, d / 2 - 0.006, m.body));
+    }
+    return g;
+  },
+
+  screen(w, h, d, m) {
+    const g = new THREE.Group();
+    g.add(boxPart(w, h * 0.82, Math.min(d, 0.05), 0, h * 0.55, 0, m.body));
+    g.add(boxPart(w * 0.08, h * 0.16, 0.04, 0, h * 0.08, 0, m.accent));
+    g.add(boxPart(w * 0.45, 0.02, d * 0.8, 0, 0.01, 0, m.accent));
+    return g;
+  },
+
+  lamp(w, h, d, m) {
+    const g = new THREE.Group();
+    const r = Math.min(w, d) / 2 || 0.05;
+    g.add(new THREE.Mesh(new THREE.CylinderGeometry(r * 0.8, r, h * 0.04, 16), m.accent)
+      .translateY(h * 0.02));
+    g.add(new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, h * 0.7, 8), m.accent)
+      .translateY(h * 0.4));
+    g.add(new THREE.Mesh(new THREE.ConeGeometry(r, h * 0.26, 16, 1, true), m.body)
+      .translateY(h * 0.85));
+    return g;
+  },
+
+  plant(w, h, d, m) {
+    const g = new THREE.Group();
+    const r = Math.min(Math.min(w, d) / 2.4, h * 0.2);
+    g.add(new THREE.Mesh(new THREE.CylinderGeometry(r * 0.8, r, h * 0.28, 12), m.accent)
+      .translateY(h * 0.14));
+    for (let i = 0; i < 4; i++) {
+      const blob = new THREE.Mesh(new THREE.IcosahedronGeometry(r * (0.75 - i * 0.09), 0), m.body);
+      blob.position.set(Math.cos(i * 2.1) * r * 0.4, h * (0.42 + i * 0.16), Math.sin(i * 2.1) * r * 0.4);
+      g.add(blob);
+    }
+    return g;
+  },
+};
+
+const FURNITURE_ALIASES = {
+  desk: 'table', 'coffee table': 'table', 'side table': 'table',
+  cabinet: 'storage', 'chest of drawers': 'storage', wardrobe: 'storage',
+  'wall art': 'screen', tv: 'screen', monitor: 'screen',
+};
+const furnitureBuilder = (label) => FURNITURE[label] ?? FURNITURE[FURNITURE_ALIASES[label]] ?? null;
+
+// Les meubles à dossier (canapé, lit, rangement, écran) sont retournés
+// pour présenter leur dos au mur le plus proche.
+const BACKED = new Set(['couch', 'bed', 'storage', 'screen']);
+
+// La boîte du casque n'est pas alignée sur Y : on cherche lequel de ses
+// axes locaux pointe vers le haut du monde, et on en déduit hauteur,
+// largeur, profondeur, ainsi que le repère où poser le modèle.
+function computeBoxFrame(item) {
+  const geometry = item.boxSurface.geometry;
+  geometry.computeBoundingBox();
+  const size = geometry.boundingBox.getSize(new THREE.Vector3());
+  const center = geometry.boundingBox.getCenter(new THREE.Vector3());
+  const rotation = new THREE.Matrix4().extractRotation(item.group.matrix);
+
+  let upAxis = 1, bestAlignment = -1, sign = 1;
+  for (let i = 0; i < 3; i++) {
+    const world = new THREE.Vector3().setComponent(i, 1).applyMatrix4(rotation);
+    if (Math.abs(world.y) > bestAlignment) {
+      bestAlignment = Math.abs(world.y); upAxis = i; sign = world.y >= 0 ? 1 : -1;
+    }
+  }
+  const rest = [0, 1, 2].filter((i) => i !== upAxis);
+  const [wideAxis, deepAxis] = size.getComponent(rest[0]) >= size.getComponent(rest[1])
+    ? rest : [rest[1], rest[0]];
+
+  const ey = new THREE.Vector3().setComponent(upAxis, sign);
+  const ex = new THREE.Vector3().setComponent(wideAxis, 1);
+  const ez = new THREE.Vector3().crossVectors(ex, ey).normalize();
+  ex.crossVectors(ey, ez).normalize();
+
+  return {
+    width: size.getComponent(wideAxis),
+    height: size.getComponent(upAxis),
+    depth: size.getComponent(deepAxis),
+    base: center.clone().addScaledVector(ey, -size.getComponent(upAxis) / 2),
+    quaternion: new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(ex, ey, ez)),
+  };
+}
+
+// Un dos plaqué contre le mur le plus proche vaut mieux qu'un dos tiré au sort.
+function facesWall(item, frame) {
+  const centre = frame.base.clone().applyMatrix4(item.group.matrix);
+  let nearest = null, best = Infinity;
+  for (const [, other] of items) {
+    if (other.source !== 'plane' || other.kind !== 'wall' || !other.group.visible) continue;
+    const d = centre.distanceTo(other.group.position);
+    if (d < best) { best = d; nearest = other; }
+  }
+  if (!nearest) return false;
+  const back = new THREE.Vector3(0, 0, -1)
+    .applyQuaternion(frame.quaternion).transformDirection(item.group.matrix);
+  const toWall = new THREE.Vector3().subVectors(nearest.group.position, centre).normalize();
+  return back.dot(toWall) < 0;         // le dos tourne le dos au mur : à retourner
+}
+
+function applyFurnitureModel(item) {
+  const builder = furnitureBuilder(item.effectiveLabel);
+  if (item.model) {
+    item.twin.remove(item.model);
+    item.model.traverse((o) => o.geometry?.dispose());
+    item.model = null;
+  }
+  if (!builder || !item.boxSurface) { if (item.boxSurface) item.boxSurface.visible = true; return; }
+
+  const frame = computeBoxFrame(item);
+  const materials = {
+    body: trackMaterial(twinMaterials, new THREE.MeshStandardMaterial({
+      color: 0xffffff, roughness: 0.82, metalness: 0.03 }), 'furniture', { isSurface: true }),
+    accent: trackMaterial(twinMaterials, new THREE.MeshStandardMaterial({
+      color: 0xffffff, roughness: 0.7, metalness: 0.05 }), 'furnitureAccent', { isSurface: true }),
+  };
+  const model = builder(frame.width, frame.height, frame.depth, materials);
+  model.position.copy(frame.base);
+  model.quaternion.copy(frame.quaternion);
+  if (BACKED.has(item.effectiveLabel) && facesWall(item, frame)) model.rotateY(Math.PI);
+
+  item.twin.add(model);
+  item.model = model;
+  item.frame = frame;
+  item.boxSurface.visible = false;     // conservée invisible : elle sert de collideur
 }
 
 /* ------------------- visualisation « réel » (overlay) --------------- */
@@ -653,6 +852,7 @@ function buildItem(xr, source, heightAboveFloor) {
       item.kind = classify(label, null, 'mesh', item.tris);
       item.overlay = buildOverlayForMesh(geometry, label);
       item.twin = buildTwinForMesh(geometry, item.kind === 'globalmesh' ? 'mesh' : 'furniture');
+      item.boxSurface = item.kind === 'volume' ? item.twin.userData.surface : null;
     } else {
       item.kind = 'globalmesh';
       item.overlay = new THREE.Group();
@@ -717,6 +917,7 @@ function relabel(item, label) {
   item.effectiveLabel = label;
   const hex = overlayColor(label);
   item.overlay.traverse((o) => { if (o.material?.color) o.material.color.setHex(hex); });
+  applyFurnitureModel(item);
 }
 
 function matchVolumes() {
@@ -936,6 +1137,14 @@ function snapshotScan() {
     } else {
       el.triangleCount = item.tris;
       el.vertexCount = (xr.vertices ?? xr.positions)?.length / 3 ?? 0;
+      if (item.frame) {
+        el.dimensionsM = {
+          width: +item.frame.width.toFixed(3),
+          height: +item.frame.height.toFixed(3),
+          depth: +item.frame.depth.toFixed(3),
+        };
+        el.modelled = !!item.model;
+      }
     }
     data.elements.push(el);
   }

@@ -9,11 +9,16 @@ laisser dans la version virtuelle de ton propre logement.
 1. **Lecture** — plans sémantiques (`plane-detection`) + maillage 3D (`mesh-detection`)
 2. **Compréhension** — chaque élément est typé : structure (sol/mur/plafond),
    ouverture (porte/fenêtre) ou volume (table/canapé/lit/rangement…)
-3. **Reconstruction** — les plans deviennent de la géométrie volumétrique : murs
-   extrudés en épaisseur, meubles extrudés de leur plateau jusqu'au sol
-4. **Bascule** — grip droit : fondu de 0,9 s du réel vers le virtuel. Un dôme opaque
+3. **Reconstruction** — les murs sont extrudés en épaisseur ; les meubles
+   utilisent la boîte englobante que le casque fournit déjà (12 triangles),
+   appariée à son plan sémantique pour hériter de son étiquette
+4. **Ameublement** — chaque volume étiqueté est remplacé par un meuble généré
+   procéduralement à ses dimensions réelles : canapé, table, étagère,
+   bibliothèque, lit, rangement, écran, lampe, plante. Aucun asset externe,
+   donc aucune dépendance ni licence
+5. **Bascule** — grip droit : fondu de 0,9 s du réel vers le virtuel. Un dôme opaque
    masque le passthrough, la pièce virtuelle reste alignée au centimètre sur la vraie
-5. **Export** — `room-scan.json` (données brutes) et `room-twin.glb` (modèle 3D
+6. **Export** — `room-scan.json` (données brutes) et `room-twin.glb` (modèle 3D
    ouvrable dans Blender)
 
 Trois styles pour le jumeau : Argile, Blueprint, Néon (grip gauche).
