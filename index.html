@@ -571,10 +571,16 @@ function buildTwinForPlane(plane, kind, heightAboveFloor) {
   if (kind === 'floor')        { depth = 0.02; role = 'floor'; }
   else if (kind === 'ceiling') { depth = 0.02; role = 'ceiling'; }
   else if (kind === 'wall')    { depth = 0.04; role = 'wall'; }
-  else if (kind === 'opening') { depth = 0.01; role = 'opening'; }
+  // Une porte partage le plan de son mur. Extrudée sur 1 cm quand le mur
+  // en fait 4, elle se retrouvait entièrement à l'intérieur : présente
+  // dans la scène, invisible à l'œil. On l'épaissit et on la recentre sur
+  // le plan pour qu'elle déborde des deux côtés, quel que soit celui où
+  // l'on se tient.
+  else if (kind === 'opening') { depth = 0.10; role = 'opening'; }
   else if (kind === 'volume')  { depth = Math.max(0.03, heightAboveFloor); role = 'furniture'; }
 
   const geometry = extrudePolygon(polygon, depth);
+  if (kind === 'opening') geometry.translate(0, depth / 2, 0);   // à cheval sur le mur
   // Les UV d'une ShapeGeometry valent la position dans le plan, donc des
   // mètres : une répétition de 1/2 donne un motif tous les 2 m.
   const PATTERN_BY_KIND = { floor: 'parquet', ceiling: 'platre', wall: 'platre',
@@ -1457,6 +1463,220 @@ function updateCameraFeed(dt) {
   if (++calibSolveCountdown >= 20) { calibSolveCountdown = 0; solveCalibration(); }
 }
 
+/* ============== recalage visuel : le filaire dans l'image =========== *
+ *  Deux exécutions du solveur automatique ont rendu 174,5 px et 228,6 px
+ *  pour la même caméra. La statistique ne les départagera pas ; la pièce,
+ *  si. On projette le filaire du scan — métrique, connu au centimètre —
+ *  dans l'image de la caméra, et l'on ajuste jusqu'à superposition.
+ *
+ *  Le même geste livre ce que la corrélation ne pouvait pas donner : les
+ *  trois angles constants entre la caméra et le viewer. La caméra étant
+ *  vissée au casque, ils se règlent une fois pour toutes.
+ *
+ *  B (manette droite) : ouvrir / fermer · X (gauche) : reprendre la
+ *  focale mesurée · miniature droite : lacet et tangage · miniature
+ *  gauche : roulis et focale.
+ * =================================================================== */
+
+const VIEW_W = 640, VIEW_H = 480;
+const RIG_KEY = 'room-twin-camera-rig';
+
+let viewPanel = null, viewCanvas = null, viewCtx = null, viewTexture = null;
+let viewOn = false, viewTimer = 0, bWasPressed = false, xWasPressed = false;
+
+// Pose de la caméra dans le repère du viewer. La translation est de
+// l'ordre de 5 cm — 1° de parallaxe à 3 m, sous le budget — mais elle
+// compte pour les objets proches, alors on la garde réglable.
+const rig = { yaw: 0, pitch: 0, roll: 0, tx: 0.032, ty: -0.02, tz: -0.05, focal: 0 };
+
+function loadRig() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(RIG_KEY) || 'null');
+    if (saved) Object.assign(rig, saved);
+  } catch { /* premier lancement, ou stockage refusé */ }
+}
+const saveRig = () => { try { localStorage.setItem(RIG_KEY, JSON.stringify(rig)); } catch {} };
+
+// La focale s'exprime ici en pixels d'une image de 640 de large ; le
+// solveur la rend pour 320. On garde les deux lisibles côte à côte.
+const measuredFocal = () => (calib.result ? calib.result.focale320px * 2 : 350);
+
+function buildCalibView() {
+  if (viewPanel) return;
+  viewCanvas = document.createElement('canvas');
+  viewCanvas.width = VIEW_W; viewCanvas.height = VIEW_H;
+  viewCtx = viewCanvas.getContext('2d');
+  viewTexture = new THREE.CanvasTexture(viewCanvas);
+  viewTexture.colorSpace = THREE.SRGBColorSpace;
+  viewPanel = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.96, 0.72),
+    new THREE.MeshBasicMaterial({ map: viewTexture, transparent: true, depthTest: false })
+  );
+  viewPanel.renderOrder = 999;
+  viewPanel.visible = false;
+  scene.add(viewPanel);
+}
+
+/* ------------------- arêtes du scan, en repère monde ---------------- */
+
+const edgeA = new THREE.Vector3(), edgeB = new THREE.Vector3();
+const BOX_EDGES = [[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],[0,4],[1,5],[2,6],[3,7]];
+const boxCorner = new THREE.Vector3();
+
+function forEachScanEdge(visit) {
+  for (const [, item] of items) {
+    if (!item.group.visible || item.kind === 'globalmesh') continue;
+    const colour = '#' + overlayColor(item.effectiveLabel).toString(16).padStart(6, '0');
+
+    if (item.source === 'plane') {
+      const polygon = item.xr.polygon ?? [];
+      for (let i = 0; i < polygon.length - 1; i++) {
+        edgeA.set(polygon[i].x, polygon[i].y, polygon[i].z).applyMatrix4(item.group.matrix);
+        edgeB.set(polygon[i + 1].x, polygon[i + 1].y, polygon[i + 1].z).applyMatrix4(item.group.matrix);
+        visit(edgeA, edgeB, colour);
+      }
+    } else if (item.boxSurface) {
+      const box = item.boxSurface.geometry.boundingBox;
+      if (!box) continue;
+      for (const [i, j] of BOX_EDGES) {
+        for (const [k, target] of [[i, edgeA], [j, edgeB]]) {
+          boxCorner.set(k & 1 ? box.max.x : box.min.x,
+                        k & 2 ? box.max.y : box.min.y,
+                        k & 4 ? box.max.z : box.min.z);
+          target.copy(boxCorner).applyMatrix4(item.group.matrix);
+        }
+        visit(edgeA, edgeB, colour);
+      }
+    }
+  }
+}
+
+/* ------------------------- projection ------------------------------ */
+
+const rigQuat = new THREE.Quaternion(), rigEuler = new THREE.Euler();
+const rigOffset = new THREE.Vector3();
+const invViewer = new THREE.Quaternion(), invRig = new THREE.Quaternion();
+const viewerAt = { p: new THREE.Vector3(), q: new THREE.Quaternion() };
+const projected = new THREE.Vector3();
+const NEAR = 0.08;
+
+function toImage(world, out) {
+  projected.copy(world).sub(viewerAt.p).applyQuaternion(invViewer);   // repère viewer
+  projected.sub(rigOffset).applyQuaternion(invRig);                   // repère caméra
+  if (projected.z > -NEAR) return false;                              // derrière l'objectif
+  const depth = -projected.z;
+  out.x = VIEW_W / 2 + rig.focal * projected.x / depth;
+  out.y = VIEW_H / 2 - rig.focal * projected.y / depth;
+  return true;
+}
+
+/* --------------------------- commandes ------------------------------ */
+
+// Les miniatures sont libres : gâchettes, grips et A servent déjà.
+function pollRigSticks(dt) {
+  const session = renderer.xr.getSession();
+  if (!session) return;
+  const dead = (v) => (Math.abs(v) < 0.15 ? 0 : v);
+
+  for (const source of session.inputSources) {
+    const pad = source.gamepad;
+    if (!pad) continue;
+    const right = source.handedness === 'right';
+
+    if (right && !!pad.buttons[5]?.pressed !== bWasPressed) {
+      bWasPressed = !!pad.buttons[5]?.pressed;
+      if (bWasPressed) {
+        viewOn = !viewOn;
+        if (viewOn && !rig.focal) rig.focal = measuredFocal();
+        if (!viewOn) saveRig();
+      }
+    }
+    if (!right && !!pad.buttons[4]?.pressed !== xWasPressed) {
+      xWasPressed = !!pad.buttons[4]?.pressed;
+      if (xWasPressed) { rig.focal = measuredFocal(); rig.yaw = rig.pitch = rig.roll = 0; }
+    }
+    if (!viewOn) continue;
+
+    const x = dead(pad.axes[2] ?? 0), y = dead(pad.axes[3] ?? 0);
+    if (right) {
+      rig.yaw   -= x * dt * 0.35;              // ~20°/s
+      rig.pitch -= y * dt * 0.35;
+    } else {
+      rig.roll  += x * dt * 0.26;
+      rig.focal *= 1 + y * dt * 0.25;          // ~25 %/s
+      rig.focal = Math.min(1400, Math.max(120, rig.focal));
+    }
+  }
+}
+
+/* ---------------------------- rendu --------------------------------- */
+
+const pointA = { x: 0, y: 0 }, pointB = { x: 0, y: 0 };
+const panelOffset = new THREE.Vector3(0, 0, -1.15);
+
+function updateCalibView(dt, time) {
+  pollRigSticks(dt);
+  if (!viewOn || !camVideo) { if (viewPanel) viewPanel.visible = false; return; }
+  buildCalibView();
+
+  // Le panneau suit la tête : c'est dans l'image qu'on juge l'alignement,
+  // pas dans le monde.
+  const latest = poseLog[(poseWrite + POSE_LOG_SIZE - 1) % POSE_LOG_SIZE];
+  if (latest.t < 0) return;
+  viewPanel.visible = true;
+  viewPanel.quaternion.copy(latest.q);
+  viewPanel.position.copy(panelOffset).applyQuaternion(latest.q).add(latest.p);
+
+  viewTimer += dt;
+  if (viewTimer < 0.066) return;                   // ~15 images par seconde
+  viewTimer = 0;
+
+  viewCtx.drawImage(camVideo, 0, 0, VIEW_W, VIEW_H);
+
+  // L'image montre le monde tel qu'il était il y a `retard` : c'est donc
+  // à cet instant qu'il faut aller chercher la pose de la tête.
+  const lag = calib.result?.retardMs ?? 80;
+  if (!poseAt(time - lag, viewerAt)) return;
+  invViewer.copy(viewerAt.q).invert();
+  rigEuler.set(rig.pitch, rig.yaw, rig.roll, 'YXZ');
+  rigQuat.setFromEuler(rigEuler);
+  invRig.copy(rigQuat).invert();
+  rigOffset.set(rig.tx, rig.ty, rig.tz);
+
+  viewCtx.lineWidth = 2;
+  viewCtx.globalAlpha = 0.9;
+  forEachScanEdge((a, b, colour) => {
+    if (!toImage(a, pointA) || !toImage(b, pointB)) return;
+    viewCtx.strokeStyle = colour;
+    viewCtx.beginPath();
+    viewCtx.moveTo(pointA.x, pointA.y);
+    viewCtx.lineTo(pointB.x, pointB.y);
+    viewCtx.stroke();
+  });
+  viewCtx.globalAlpha = 1;
+
+  // Croix centrale : repère du point principal, supposé au centre.
+  viewCtx.strokeStyle = 'rgba(255,255,255,0.5)';
+  viewCtx.lineWidth = 1;
+  viewCtx.beginPath();
+  viewCtx.moveTo(VIEW_W / 2 - 14, VIEW_H / 2); viewCtx.lineTo(VIEW_W / 2 + 14, VIEW_H / 2);
+  viewCtx.moveTo(VIEW_W / 2, VIEW_H / 2 - 14); viewCtx.lineTo(VIEW_W / 2, VIEW_H / 2 + 14);
+  viewCtx.stroke();
+
+  const fov = 2 * Math.atan(VIEW_W / 2 / rig.focal) * 180 / Math.PI;
+  const deg = (r) => (r * 180 / Math.PI).toFixed(1);
+  viewCtx.fillStyle = 'rgba(6,12,22,0.82)';
+  viewCtx.fillRect(0, VIEW_H - 46, VIEW_W, 46);
+  viewCtx.fillStyle = '#7cf3ff';
+  viewCtx.font = '600 19px system-ui, sans-serif';
+  viewCtx.fillText(`focale ${(rig.focal / 2).toFixed(1)} px@320 · champ ${fov.toFixed(1)}°`, 12, VIEW_H - 26);
+  viewCtx.fillStyle = '#cfe0f7';
+  viewCtx.font = '400 16px system-ui, sans-serif';
+  viewCtx.fillText(`lacet ${deg(rig.yaw)}° · tangage ${deg(rig.pitch)}° · roulis ${deg(rig.roll)}°` +
+                   ` · retard ${lag} ms · mesuré ${(measuredFocal() / 2).toFixed(1)}`, 12, VIEW_H - 7);
+  viewTexture.needsUpdate = true;
+}
+
 /* ==================== calibration optique ========================== *
  *  getUserMedia ne livre ni intrinsèques ni pose. Les deux se mesurent.
  *
@@ -1889,6 +2109,9 @@ function solveCalibration() {
     referenceFisheye: 0.843,                // fisheye équidistant : très stable
     horlogeXRms: clockOffset === null ? null : +clockOffset.toFixed(1),
     balayageRetard: sweep,
+    captureWxH: caps.cameraFeed?.settings
+      ? `${caps.cameraFeed.settings.width}×${caps.cameraFeed.settings.height}` : null,
+    rigCamera: { ...rig },
     imagesVues: calib.frames,
     rejets: { ...calib.rejected },
   };
@@ -1999,6 +2222,7 @@ function tick(time, frame) {
 
   updateBlend(dt);
   updateCameraFeed(dt);
+  updateCalibView(dt, time);
   scene.updateMatrixWorld(true);
   updateBalls(dt);
 
@@ -2354,6 +2578,11 @@ function showReport() {
       : '—'],
     ['Profondeur de scène mesurée', cal?.profondeurSceneM ? cal.profondeurSceneM + ' m' : 'non séparable'],
     ['Rayon de rotation de la tête', cal?.rayonRotationM ? cal.rayonRotationM + ' m' : '—'],
+    ['Format capturé pendant la mesure', cal?.captureWxH ?? '—'],
+    ['Recalage manuel (B en session)', rig.focal
+      ? `focale ${(rig.focal / 2).toFixed(1)} px@320 · champ ` +
+        `${(2 * Math.atan(320 / rig.focal) * 180 / Math.PI).toFixed(1)}°`
+      : 'jamais ouvert'],
     ['Distorsion — flancs / centre', cal && cal.flancDroit
       ? `${cal.flancGauche ?? '—'} et ${cal.flancDroit} · sténopé 0,89–1,01 · fisheye 0,84`
       : 'pas assez d\'échantillons'],
@@ -2453,6 +2682,7 @@ async function checkSupport() {
 }
 
 init();
+loadRig();
 checkSupport();
 probeMediaDevices();
 probePlatform();

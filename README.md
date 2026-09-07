@@ -111,6 +111,23 @@ Mesuré sur Quest 3, navigateur Oculus 150 :
 La stéréo est donc ouverte : base sur profondeur = 0,022, soit une base de ~6,5 cm
 pour une scène à 3 m — cohérent avec l'écartement des deux caméras RGB du casque.
 
+### Recalage visuel — **B** en session
+
+Le solveur automatique a rendu 174,5 px puis 228,6 px pour la même caméra sur deux
+passages du même code : 31 % d'écart. La statistique ne les départage pas, la pièce
+si. **B** (manette droite) ouvre un panneau qui projette le filaire du scan —
+métrique, connu au centimètre — dans l'image de la caméra. On ajuste jusqu'à
+superposition ; entre 70° et 85° de champ, l'écart est visuellement massif.
+
+Le même geste livre ce que la corrélation ne peut pas donner : les **trois angles
+constants entre la caméra et le viewer**, la caméra étant vissée au casque. La
+miniature droite règle lacet et tangage, la gauche roulis et focale, **X** (manette
+gauche) reprend la valeur mesurée. Le réglage est conservé d'une session à l'autre.
+
+La projection est vérifiée sur quatorze conventions : un lacet de tête de 5° déplace
+bien un point fixe de `centre + focale·tan(5°)` — exactement le modèle que la
+corrélation ajuste, ce qui referme la boucle entre les deux moitiés.
+
 ### Sondes ajoutées
 
 - **« Sonder l'optique »** (page de rapport) : échelle de résolutions réellement
