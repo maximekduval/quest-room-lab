@@ -101,7 +101,7 @@ Mesuré sur Quest 3, navigateur Oculus 150 :
 | Retard capture → rappel, annoncé par le navigateur | 16,6 ms |
 | Capteur | **1280×1280** — `1600×1200` renvoie du `1200×1280` en portrait |
 | Meilleur format 4:3 servi | **1280×960 à 30 im/s** (et non 640×480) |
-| Champ horizontal mesuré | ~85°, à confirmer sans le biais de parallaxe |
+| Champ horizontal mesuré | **~72,7°** — voir ci-dessous |
 | Flancs / centre | 0,911 et 0,927 → **image rectilinéaire**, pas de fisheye |
 | Les deux caméras du monde **simultanément** | **oui** — disparité 3,81 px, corrélation 0,94 |
 | WebGPU | adaptateur Adreno 740, `shader-f16`, `subgroups`, 2 Go |
@@ -110,6 +110,19 @@ Mesuré sur Quest 3, navigateur Oculus 150 :
 
 La stéréo est donc ouverte : base sur profondeur = 0,022, soit une base de ~6,5 cm
 pour une scène à 3 m — cohérent avec l'écartement des deux caméras RGB du casque.
+
+Trois passages ont été nécessaires pour fixer le champ, et le troisième seul fait foi :
+
+| | format | modèle | échantillons | champ |
+|---|---|---|---|---|
+| passage 1 | 640×480 | 1p | 13 | 85° — aberrant, retard mal choisi |
+| passage 2 | 640×480 | 1p | 23 | 70° |
+| **passage 3** | **1280×960** | **2p** | **103** | **72,7°** |
+
+Le passage 3 sépare la parallaxe (corrélation des régresseurs 0,312) et rend au
+passage deux quantités physiques justes : **profondeur de scène 3,02 m** et **rayon
+de rotation de la tête 0,11 m** — un cou. Le champ ne change pas entre 640×480 et
+1280×960 : le petit format était une réduction, pas un recadrage.
 
 ### Recalage visuel — **B** en session
 
@@ -124,9 +137,24 @@ constants entre la caméra et le viewer**, la caméra étant vissée au casque. 
 miniature droite règle lacet et tangage, la gauche roulis et focale, **X** (manette
 gauche) reprend la valeur mesurée. Le réglage est conservé d'une session à l'autre.
 
+**Y** lance l'alignement automatique : l'image contient déjà la réponse, les
+jonctions mur-sol et les encadrements y tracent des gradients francs. Le recalage
+cherche le rig qui pose le plus d'arêtes projetées sur le plus de gradient — un
+chanfrein à quatre inconnues, quadrillage grossier puis descente par coordonnées.
+Seules les surfaces structurelles servent de repère : une boîte englobante de canapé
+n'a pas d'arête franche dans l'image.
+
+Sur pièce synthétique, en partant de trois angles nuls et d'une focale fausse de
+15 %, il retrouve le rig à **0,6° près sur les trois angles et 1 % sur la focale** —
+très en deçà du budget de 3° que demande l'association d'objets.
+
 La projection est vérifiée sur quatorze conventions : un lacet de tête de 5° déplace
 bien un point fixe de `centre + focale·tan(5°)` — exactement le modèle que la
 corrélation ajuste, ce qui referme la boucle entre les deux moitiés.
+
+Le casque expose **deux objectifs « back » distants d'environ 6,5 cm** et sert celui
+qu'il veut : un réglage fait sur l'un est faux sur l'autre. Le rig est donc mémorisé
+par libellé de caméra.
 
 ### Sondes ajoutées
 

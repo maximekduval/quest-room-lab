@@ -1346,6 +1346,7 @@ async function openCamera(constraints) {
   watchVideoFrames(camVideo);
 
   buildCameraPanel();
+  selectRig(track.label);
   caps.cameraFeed = {
     live: true, label: track.label, settings: track.getSettings(),
     worldFacing: isWorldFacing(track.label), framesInSession: 0,
@@ -1482,24 +1483,38 @@ const VIEW_W = 640, VIEW_H = 480;
 const RIG_KEY = 'room-twin-camera-rig';
 
 let viewPanel = null, viewCanvas = null, viewCtx = null, viewTexture = null;
-let viewOn = false, viewTimer = 0, bWasPressed = false, xWasPressed = false;
+let viewOn = false, viewTimer = 0, bWasPressed = false, xWasPressed = false, yWasPressed = false;
 
 // Pose de la caméra dans le repère du viewer. La translation est de
 // l'ordre de 5 cm — 1° de parallaxe à 3 m, sous le budget — mais elle
 // compte pour les objets proches, alors on la garde réglable.
 const rig = { yaw: 0, pitch: 0, roll: 0, tx: 0.032, ty: -0.02, tz: -0.05, focal: 0 };
 
+// Le casque expose deux objectifs « back », distants d'environ 6,5 cm,
+// et startCameraFeed prend celui que le pilote sert. Un réglage fait sur
+// l'un est faux sur l'autre : on garde donc un rig par libellé.
+const DEFAULT_RIG = { yaw: 0, pitch: 0, roll: 0, tx: 0.032, ty: -0.02, tz: -0.05, focal: 0 };
+let rigStore = {}, rigKey = 'inconnue';
+
 function loadRig() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(RIG_KEY) || 'null');
-    if (saved) Object.assign(rig, saved);
-  } catch { /* premier lancement, ou stockage refusé */ }
+  try { rigStore = JSON.parse(localStorage.getItem(RIG_KEY) || '{}') || {}; }
+  catch { rigStore = {}; }
 }
-const saveRig = () => { try { localStorage.setItem(RIG_KEY, JSON.stringify(rig)); } catch {} };
+function selectRig(label) {
+  rigKey = label || 'inconnue';
+  Object.assign(rig, DEFAULT_RIG, rigStore[rigKey] ?? {});
+  if (!rig.focal) rig.focal = measuredFocal();
+}
+const saveRig = () => {
+  rigStore[rigKey] = { ...rig };
+  try { localStorage.setItem(RIG_KEY, JSON.stringify(rigStore)); } catch {}
+};
 
 // La focale s'exprime ici en pixels d'une image de 640 de large ; le
 // solveur la rend pour 320. On garde les deux lisibles côte à côte.
-const measuredFocal = () => (calib.result ? calib.result.focale320px * 2 : 350);
+// Repli avant la première calibration : 217 px@320, soit ~72,7° —
+// la valeur que deux passages sur casque ont concordamment rendue.
+const measuredFocal = () => (calib.result ? calib.result.focale320px * 2 : 434);
 
 function buildCalibView() {
   if (viewPanel) return;
@@ -1523,9 +1538,12 @@ const edgeA = new THREE.Vector3(), edgeB = new THREE.Vector3();
 const BOX_EDGES = [[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],[0,4],[1,5],[2,6],[3,7]];
 const boxCorner = new THREE.Vector3();
 
-function forEachScanEdge(visit) {
+const STRUCTURAL = new Set(['floor', 'ceiling', 'wall', 'opening']);
+
+function forEachScanEdge(visit, structuralOnly = false) {
   for (const [, item] of items) {
     if (!item.group.visible || item.kind === 'globalmesh') continue;
+    if (structuralOnly && !STRUCTURAL.has(item.kind)) continue;
     const colour = '#' + overlayColor(item.effectiveLabel).toString(16).padStart(6, '0');
 
     if (item.source === 'plane') {
@@ -1593,7 +1611,11 @@ function pollRigSticks(dt) {
     }
     if (!right && !!pad.buttons[4]?.pressed !== xWasPressed) {
       xWasPressed = !!pad.buttons[4]?.pressed;
-      if (xWasPressed) { rig.focal = measuredFocal(); rig.yaw = rig.pitch = rig.roll = 0; }
+      if (xWasPressed) { rig.focal = measuredFocal(); rig.yaw = rig.pitch = rig.roll = 0; alignScore = null; }
+    }
+    if (!right && !!pad.buttons[5]?.pressed !== yWasPressed) {
+      yWasPressed = !!pad.buttons[5]?.pressed;
+      if (yWasPressed && viewOn) autoAlign();     // ~0,3 s : une saccade, assumée
     }
     if (!viewOn) continue;
 
@@ -1673,8 +1695,144 @@ function updateCalibView(dt, time) {
   viewCtx.fillStyle = '#cfe0f7';
   viewCtx.font = '400 16px system-ui, sans-serif';
   viewCtx.fillText(`lacet ${deg(rig.yaw)}° · tangage ${deg(rig.pitch)}° · roulis ${deg(rig.roll)}°` +
-                   ` · retard ${lag} ms · mesuré ${(measuredFocal() / 2).toFixed(1)}`, 12, VIEW_H - 7);
+                   ` · retard ${lag} ms · ${rigKey}` +
+                   (alignScore != null ? ` · Y : score ${alignScore.toFixed(3)}` : ' · Y = aligner'),
+                   12, VIEW_H - 7);
   viewTexture.needsUpdate = true;
+}
+
+/* ------------- alignement automatique sur les arêtes --------------- *
+ *  Régler quatre paramètres à la miniature est pénible et peu fiable.
+ *  L'image contient déjà la réponse : les jonctions mur-sol, les
+ *  encadrements, les angles de pièce y tracent des gradients francs. On
+ *  cherche donc le rig qui pose le plus d'arêtes projetées sur le plus
+ *  de gradient — un recalage par chanfrein, à quatre inconnues.
+ *
+ *  Seules les surfaces structurelles servent de repère : une boîte
+ *  englobante de canapé n'a pas d'arête franche dans l'image, elle
+ *  n'apporterait que du bruit au score.
+ * =================================================================== */
+
+const MAP_W = 160, MAP_H = 120;
+let scoreMap = null, scoreCanvas = null, scoreCtx = null, alignScore = null;
+
+function boxBlur(src, w, h, radius) {
+  const tmp = new Float32Array(src.length), out = new Float32Array(src.length);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let sum = 0, n = 0;
+    for (let k = -radius; k <= radius; k++) {
+      const u = x + k;
+      if (u >= 0 && u < w) { sum += src[y * w + u]; n++; }
+    }
+    tmp[y * w + x] = sum / n;
+  }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let sum = 0, n = 0;
+    for (let k = -radius; k <= radius; k++) {
+      const v = y + k;
+      if (v >= 0 && v < h) { sum += tmp[v * w + x]; n++; }
+    }
+    out[y * w + x] = sum / n;
+  }
+  return out;
+}
+
+function buildScoreMap() {
+  if (!scoreCanvas) {
+    scoreCanvas = document.createElement('canvas');
+    scoreCanvas.width = MAP_W; scoreCanvas.height = MAP_H;
+    scoreCtx = scoreCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  scoreCtx.drawImage(camVideo, 0, 0, MAP_W, MAP_H);
+  const px = scoreCtx.getImageData(0, 0, MAP_W, MAP_H).data;
+
+  const lum = new Float32Array(MAP_W * MAP_H);
+  for (let i = 0, j = 0; i < px.length; i += 4, j++)
+    lum[j] = 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
+
+  const grad = new Float32Array(MAP_W * MAP_H);
+  for (let y = 1; y < MAP_H - 1; y++) for (let x = 1; x < MAP_W - 1; x++) {
+    const i = y * MAP_W + x;
+    grad[i] = Math.hypot(lum[i + 1] - lum[i - 1], lum[i + MAP_W] - lum[i - MAP_W]);
+  }
+  // Sans flou, l'optimiseur ne « voit » une arête que s'il tombe pile
+  // dessus : le bassin d'attraction serait large d'un pixel.
+  const wide = boxBlur(boxBlur(grad, MAP_W, MAP_H, 2), MAP_W, MAP_H, 2);
+  let peak = 0;
+  for (const v of wide) if (v > peak) peak = v;
+  scoreMap = peak > 0 ? wide.map((v) => v / peak) : wide;
+}
+
+function applyRig(candidate) {
+  rigEuler.set(candidate.pitch, candidate.yaw, candidate.roll, 'YXZ');
+  rigQuat.setFromEuler(rigEuler);
+  invRig.copy(rigQuat).invert();
+  rigOffset.set(rig.tx, rig.ty, rig.tz);
+  rig.focal = candidate.focal;
+}
+
+const MIN_SAMPLES = 220;                 // en dessous, la vue est trop vide
+
+function scoreRig(candidate) {
+  applyRig(candidate);
+  let total = 0, count = 0;
+  forEachScanEdge((a, b) => {
+    if (!toImage(a, pointA) || !toImage(b, pointB)) return;
+    const dx = pointB.x - pointA.x, dy = pointB.y - pointA.y;
+    const steps = Math.min(48, Math.max(2, Math.round(Math.hypot(dx, dy) / 6)));
+    for (let s = 0; s <= steps; s++) {
+      const x = (pointA.x + dx * s / steps) * MAP_W / VIEW_W;
+      const y = (pointA.y + dy * s / steps) * MAP_H / VIEW_H;
+      if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H) continue;
+      total += scoreMap[(y | 0) * MAP_W + (x | 0)];
+      count++;
+    }
+  }, true);
+  // Diviser par `count` seul récompenserait un rig qui envoie presque
+  // tout hors cadre : on plancher le dénominateur.
+  return count < 30 ? -1 : total / Math.max(count, MIN_SAMPLES);
+}
+
+function autoAlign() {
+  if (!camVideo || camVideo.readyState < 2) return null;
+  buildScoreMap();
+
+  let best = { yaw: rig.yaw, pitch: rig.pitch, roll: rig.roll, focal: rig.focal };
+  let bestScore = scoreRig(best);
+
+  // Balayage grossier en lacet et tangage : la descente locale ne sait
+  // pas sortir du mauvais bassin, un quadrillage préalable si.
+  for (let y = -0.2; y <= 0.201; y += 0.05)
+    for (let p = -0.2; p <= 0.201; p += 0.05) {
+      const candidate = { ...best, yaw: y, pitch: p };
+      const s = scoreRig(candidate);
+      if (s > bestScore) { bestScore = s; best = candidate; }
+    }
+
+  // Puis descente par coordonnées, pas divisé par deux à chaque palier.
+  const step = { yaw: 0.05, pitch: 0.05, roll: 0.04, focal: best.focal * 0.06 };
+  for (let level = 0; level < 8; level++) {
+    for (let pass = 0; pass < 6; pass++) {
+      let improved = false;
+      for (const key of ['yaw', 'pitch', 'roll', 'focal']) {
+        for (const direction of [1, -1]) {
+          const candidate = { ...best, [key]: best[key] + direction * step[key] };
+          if (candidate.focal < 150 || candidate.focal > 1200) continue;
+          if (Math.abs(candidate.yaw) > 0.5 || Math.abs(candidate.pitch) > 0.5) continue;
+          const s = scoreRig(candidate);
+          if (s > bestScore) { bestScore = s; best = candidate; improved = true; }
+        }
+      }
+      if (!improved) break;
+    }
+    for (const key of Object.keys(step)) step[key] *= 0.5;
+  }
+
+  Object.assign(rig, best);
+  applyRig(best);
+  alignScore = bestScore;
+  saveRig();
+  return bestScore;
 }
 
 /* ==================== calibration optique ========================== *
@@ -2111,7 +2269,8 @@ function solveCalibration() {
     balayageRetard: sweep,
     captureWxH: caps.cameraFeed?.settings
       ? `${caps.cameraFeed.settings.width}×${caps.cameraFeed.settings.height}` : null,
-    rigCamera: { ...rig },
+    camera: caps.cameraFeed?.label ?? null,
+    rigCamera: { ...rig, objectif: rigKey, score: alignScore },
     imagesVues: calib.frames,
     rejets: { ...calib.rejected },
   };
@@ -2579,6 +2738,7 @@ function showReport() {
     ['Profondeur de scène mesurée', cal?.profondeurSceneM ? cal.profondeurSceneM + ' m' : 'non séparable'],
     ['Rayon de rotation de la tête', cal?.rayonRotationM ? cal.rayonRotationM + ' m' : '—'],
     ['Format capturé pendant la mesure', cal?.captureWxH ?? '—'],
+    ['Recalage — score d\'alignement', alignScore != null ? alignScore.toFixed(3) : 'jamais lancé'],
     ['Recalage manuel (B en session)', rig.focal
       ? `focale ${(rig.focal / 2).toFixed(1)} px@320 · champ ` +
         `${(2 * Math.atan(320 / rig.focal) * 180 / Math.PI).toFixed(1)}°`
