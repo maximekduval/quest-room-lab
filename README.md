@@ -25,24 +25,40 @@ Trois styles pour le jumeau : Argile, Blueprint, Néon (grip gauche).
 
 ## Ce que ça fait
 
-| Fonction | API WebXR | Casques |
+| Fonction | API | Casques |
 |---|---|---|
 | Plans sémantiques (sol, mur, table, canapé, porte, fenêtre…) | `plane-detection` | Quest 2 / 3 / 3S / Pro |
-| Maillage 3D de la pièce (murs + meubles, triangles) | `mesh-detection` | Quest 3 / 3S (scan de pièce) |
-| Viser une surface réelle (réticule) | `hit-test` | tous |
-| Poser un repère qui reste fixe dans le monde réel | `anchors` | tous |
-| Passthrough couleur | `immersive-ar` | Quest 3 / 3S / Pro (N&B sur Quest 2) |
+| Boîte englobante 3D par meuble + maillage global de la pièce | `mesh-detection` | Quest 3 / 3S |
+| Viser une surface réelle | `hit-test` | tous |
+| Repère fixe dans le monde réel | `anchors` | tous |
+| Passthrough couleur | `immersive-ar` | Quest 3 / 3S / Pro |
 | Mains nues (pincement = gâchette) | `hand-tracking` | tous |
-| Balles qui rebondissent sur les vrais murs et meubles | raycast sur la géométrie détectée | tous |
+| **Flux des caméras du monde, en session immersive** | `getUserMedia` | Quest 3 / 3S |
+| Balles rebondissant sur les vrais murs et meubles | raycast sur la géométrie détectée | tous |
 
-Les fonctions non supportées sont simplement désactivées : la démo reste utilisable
-sur Quest 2 (plans uniquement, pas de maillage).
+### Accès caméra : deux chemins, un seul ouvert
+
+Mesuré sur Quest 3, et contre-intuitif :
+
+- le module WebXR **`camera-access` est refusé** — pas de `XRCamera` ;
+- **`getUserMedia` fonctionne**, et le flux **survit à la session immersive**.
+
+Le casque expose **trois caméras**. `camera 0, facing front` regarde vers le visage
+de l'utilisateur, à travers les lentilles : image floue, surexposée, cerclée
+d'anneaux infrarouges. Ce sont `camera 1` et `camera 2, facing back` qui voient la
+pièce ; `facingMode: { ideal: 'environment' }` suffit à les obtenir. Les libellés ne
+sont lisibles qu'après l'autorisation.
+
+Ce que `getUserMedia` ne fournit pas : les **intrinsèques et la pose** de la caméra
+dans le repère XR, indispensables pour reprojeter précisément une détection 2D sur
+le scan 3D.
 
 ## Commandes dans le casque
 
 - **Gâchette droite** : tirer une balle (elle rebondit sur la géométrie réelle et se pose)
 - **Gâchette gauche** : poser un repère ancré sur la surface visée
-- **Grip** : cycler l'affichage — plans + maillage / plans seuls / maillage seul / passthrough pur
+- **Grip droit** : basculer réel ↔ virtuel · **Grip gauche** : changer de style
+- **Bouton A** (manette droite) : caméra suivante parmi les trois
 - Un petit **HUD** flotte au-dessus de la main gauche (compteurs + étiquettes détectées)
 
 ## Prérequis côté casque
