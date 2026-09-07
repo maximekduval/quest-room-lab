@@ -52,6 +52,12 @@
   .row:last-child { border-bottom: 0; }
   .row .k { color: #cfe0f7; } .row .v { color: #7f94b6; font-variant-numeric: tabular-nums; }
   .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  #digest {
+    width: 100%; height: 220px; margin-top: 14px; padding: 12px;
+    border-radius: 12px; border: 1px solid rgba(124,243,255,.18);
+    background: rgba(4,9,18,.8); color: #a8bcd8; resize: vertical;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5;
+  }
   body.xr-active #ui { justify-content: flex-start; background: transparent; }
   body.xr-active h1, body.xr-active p.sub, body.xr-active .hint,
   body.xr-active #start, body.xr-active #report { display: none; }
@@ -83,7 +89,9 @@
       <div class="actions">
         <button class="ghost" id="dl-json">Télécharger le scan (.json)</button>
         <button class="ghost" id="dl-glb">Télécharger le jumeau (.glb)</button>
+        <button class="ghost" id="copy">Copier tout dans le presse-papier</button>
       </div>
+      <textarea id="digest" readonly placeholder="Le scan complet apparaîtra ici à la sortie de session."></textarea>
     </div>
   </div>
 
@@ -165,6 +173,8 @@ const ui = {
   inventory: document.getElementById('inventory'),
   dlJson: document.getElementById('dl-json'),
   dlGlb: document.getElementById('dl-glb'),
+  copy: document.getElementById('copy'),
+  digest: document.getElementById('digest'),
 };
 
 const lines = [];
@@ -188,6 +198,16 @@ const overlayMaterials = [];
 const twinMaterials = [];
 
 const inventory = { byLabel: new Map(), planes: 0, meshes: 0, tris: 0, floorArea: 0, features: [] };
+
+// Sonde de capacités : c'est le casque qui répond, pas nos suppositions.
+const caps = {
+  features: [],
+  cameraAccessRequested: false,   // 'camera-access' listé dans enabledFeatures ?
+  xrCamera: null,                 // views[0].camera exposé par le runtime ?
+  cameraImageApi: null,           // XRWebGLBinding.getCameraImage disponible ?
+  videoInputs: null,              // périphériques vidéo vus par getUserMedia
+  probed: false,
+};
 const theme = () => THEMES[themeIndex];
 
 /* ------------------------------- init ------------------------------ */
@@ -717,6 +737,31 @@ function updateHitTest(frame, refSpace) {
   reticle.visible = false;
 }
 
+/* ------------------- sonde d'accès aux caméras --------------------- */
+
+// WebXR expose les pixels du passthrough via views[].camera (module Raw
+// Camera Access). Sur Quest ce module n'est a priori pas implémenté — on
+// vérifie plutôt que de le supposer.
+function probeCamera(frame, refSpace) {
+  if (caps.probed) return;
+  const pose = frame.getViewerPose(refSpace);
+  if (!pose || !pose.views.length) return;
+  const view = pose.views[0];
+  caps.xrCamera = view.camera
+    ? { width: view.camera.width, height: view.camera.height }
+    : false;
+  caps.probed = true;
+}
+
+async function probeMediaDevices() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    caps.videoInputs = devices.filter((d) => d.kind === 'videoinput').length;
+  } catch {
+    caps.videoInputs = -1;
+  }
+}
+
 /* ------------------------------ physique --------------------------- */
 
 const raycaster = new THREE.Raycaster();
@@ -784,6 +829,7 @@ function tick(time, frame) {
   if (frame) {
     const refSpace = renderer.xr.getReferenceSpace();
     if (refSpace) {
+      probeCamera(frame, refSpace);
       syncScan(frame, refSpace);
       updateAnchors(frame, refSpace);
       updateHitTest(frame, refSpace);
@@ -864,9 +910,26 @@ ui.dlGlb.addEventListener('click', async () => {
   }
 });
 
+ui.copy.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(ui.digest.value);
+    ui.copy.textContent = 'Copié ✓';
+  } catch {
+    ui.digest.select();               // repli : sélection manuelle
+    ui.copy.textContent = 'Sélectionné — Ctrl/Cmd+C';
+  }
+  setTimeout(() => { ui.copy.textContent = 'Copier tout dans le presse-papier'; }, 2500);
+});
+
 function showReport() {
   lastScan = snapshotScan();
+  const verdict = (v) => v === true ? 'oui' : v === false ? 'non' : (v ?? '—');
   const rows = [
+    ['Accès caméra passthrough (WebXR)', caps.cameraAccessRequested ? 'ACCORDÉ' : 'refusé / non supporté'],
+    ['Objet XRCamera exposé', caps.xrCamera ? `oui — ${caps.xrCamera.width}×${caps.xrCamera.height}` : verdict(caps.xrCamera)],
+    ['XRWebGLBinding.getCameraImage', verdict(caps.cameraImageApi)],
+    ['Périphériques vidéo visibles', caps.videoInputs === -1 ? 'énumération refusée' : String(caps.videoInputs ?? '—')],
+    ['Features accordées', caps.features.join(', ') || '—'],
     ['Surface au sol', inventory.floorArea.toFixed(2) + ' m²'],
     ['Plans détectés', String(inventory.planes)],
     ['Maillages', `${inventory.meshes} (${inventory.tris.toLocaleString('fr-FR')} triangles)`],
@@ -875,6 +938,7 @@ function showReport() {
   ui.inventory.innerHTML = rows
     .map(([k, v]) => `<div class="row"><span class="k">${k}</span><span class="v">${v}</span></div>`)
     .join('');
+  ui.digest.value = JSON.stringify({ capacites: caps, scan: lastScan }, null, 2);
   ui.report.classList.add('show');
   ui.dlGlb.disabled = items.size === 0;
   ui.dlJson.disabled = items.size === 0;
@@ -890,11 +954,15 @@ async function startSession() {
   try {
     const session = await navigator.xr.requestSession('immersive-ar', {
       requiredFeatures: ['local-floor'],
-      optionalFeatures: ['plane-detection', 'mesh-detection', 'hit-test', 'anchors', 'hand-tracking', 'dom-overlay'],
+      optionalFeatures: ['plane-detection', 'mesh-detection', 'hit-test', 'anchors', 'hand-tracking', 'dom-overlay', 'camera-access'],
       domOverlay: { root: ui.root },
     });
 
     inventory.features = (session.enabledFeatures ?? []).filter((f) => f !== 'viewer' && f !== 'local-floor');
+    caps.features = inventory.features;
+    caps.cameraAccessRequested = inventory.features.includes('camera-access');
+    caps.cameraImageApi = typeof XRWebGLBinding !== 'undefined'
+      && typeof XRWebGLBinding.prototype.getCameraImage === 'function';
     ui.body.classList.add('xr-active');
     ui.status.textContent = inventory.features.length
       ? 'Actif : ' + inventory.features.join(', ')
@@ -939,6 +1007,7 @@ async function checkSupport() {
 
 init();
 checkSupport();
+probeMediaDevices();
 ui.start.addEventListener('click', startSession);
 </script>
 </body>
