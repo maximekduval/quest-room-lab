@@ -52,7 +52,10 @@
   .row:last-child { border-bottom: 0; }
   .row .k { color: #cfe0f7; } .row .v { color: #7f94b6; font-variant-numeric: tabular-nums; }
   .actions { display: flex; gap: 10px; flex-wrap: wrap; }
-  #cam-result { margin-top: 12px; font-size: 13px; color: #9db0d0; line-height: 1.6; }
+  #cam-result { margin-top: 12px; font-size: 13px; color: #9db0d0; line-height: 1.7; }
+  #cam-result.active { padding: 14px 16px; border-radius: 12px; color: #e9eef8;
+                       background: rgba(124,243,255,.08); border: 1px solid rgba(124,243,255,.35); }
+  #cam-result div { padding: 2px 0; }
   #cam-result canvas { display: block; margin-top: 8px; max-width: 100%; border-radius: 10px;
                        border: 1px solid rgba(124,243,255,.25); }
   #digest {
@@ -535,11 +538,16 @@ function buildTwinForPlane(plane, kind, heightAboveFloor) {
   else if (kind === 'volume')  { depth = Math.max(0.03, heightAboveFloor); role = 'furniture'; }
 
   const geometry = extrudePolygon(polygon, depth);
-  const surface = new THREE.Mesh(geometry, trackMaterial(twinMaterials, new THREE.MeshStandardMaterial({
-    color: 0xffffff, roughness: 0.85, metalness: 0.02, side: THREE.DoubleSide,
-    emissive: kind === 'opening' ? 0x224455 : 0x000000,
-    emissiveIntensity: kind === 'opening' ? 1.4 : 0,
-  }), role, { isSurface: true }));
+  // Les UV d'une ShapeGeometry valent la position dans le plan, donc des
+  // mètres : une répétition de 1/2 donne un motif tous les 2 m.
+  const PATTERN_BY_KIND = { floor: 'parquet', ceiling: 'platre', wall: 'platre',
+                            opening: 'lisse', volume: 'bois' };
+  const surface = new THREE.Mesh(geometry, texturedMaterial(
+    PATTERN_BY_KIND[kind] ?? 'platre', kind === 'floor' ? 0.9 : 0.55, role, {
+      side: THREE.DoubleSide,
+      emissive: kind === 'opening' ? 0x224455 : 0x000000,
+      emissiveIntensity: kind === 'opening' ? 1.4 : 0,
+    }));
   group.add(surface);
   group.userData.collider = surface;
 
@@ -553,14 +561,151 @@ function buildTwinForPlane(plane, kind, heightAboveFloor) {
 
 function buildTwinForMesh(geometry, role) {
   const group = new THREE.Group();
-  const surface = new THREE.Mesh(geometry, trackMaterial(twinMaterials, new THREE.MeshStandardMaterial({
-    color: 0xffffff, roughness: 0.9, metalness: 0.0, side: THREE.DoubleSide, flatShading: true,
-  }), role, { isSurface: true }));
+  const surface = new THREE.Mesh(geometry, texturedMaterial('platre', 0.5, role, {
+    roughness: 0.9, metalness: 0.0, side: THREE.DoubleSide, flatShading: true,
+  }));
   group.add(surface);
   group.userData.collider = surface;
   group.userData.surface = surface;
   return group;
 }
+
+/* ===================== textures procédurales ======================= *
+ *  Dessinées sur canvas en niveaux de gris : la teinte vient du thème
+ *  via material.color, si bien qu'une seule texture sert les trois
+ *  styles. Le même canvas alimente aussi le relief (bumpMap).
+ * =================================================================== */
+
+function grainNoise(ctx, size, amount) {
+  const image = ctx.getImageData(0, 0, size, size), d = image.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const n = (Math.random() - 0.5) * amount;
+    d[i] += n; d[i + 1] += n; d[i + 2] += n;
+  }
+  ctx.putImageData(image, 0, 0);
+}
+
+const PATTERNS = {
+  bois(ctx, s) {
+    ctx.fillStyle = '#dedede'; ctx.fillRect(0, 0, s, s);
+    for (let i = 0; i < 110; i++) {                       // veinage
+      const y = Math.random() * s;
+      ctx.strokeStyle = `rgba(60,40,20,${0.02 + Math.random() * 0.08})`;
+      ctx.lineWidth = 0.5 + Math.random() * 2.2;
+      ctx.beginPath(); ctx.moveTo(0, y);
+      ctx.bezierCurveTo(s / 3, y + (Math.random() - 0.5) * 12,
+                        2 * s / 3, y + (Math.random() - 0.5) * 12,
+                        s, y + (Math.random() - 0.5) * 8);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = 'rgba(40,25,10,0.28)'; ctx.lineWidth = 2;
+    for (const y of [s * 0.34, s * 0.68]) {               // joints de lames
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(s, y); ctx.stroke();
+    }
+    grainNoise(ctx, s, 12);
+  },
+
+  tissu(ctx, s) {
+    ctx.fillStyle = '#dcdcdc'; ctx.fillRect(0, 0, s, s);
+    const step = 6;                                       // armure croisée
+    for (let x = 0; x < s; x += step) {
+      ctx.fillStyle = 'rgba(0,0,0,0.07)'; ctx.fillRect(x, 0, step / 2, s);
+    }
+    for (let y = 0; y < s; y += step) {
+      ctx.fillStyle = 'rgba(255,255,255,0.09)'; ctx.fillRect(0, y, s, step / 2);
+    }
+    grainNoise(ctx, s, 20);
+  },
+
+  platre(ctx, s) {
+    ctx.fillStyle = '#e4e4e4'; ctx.fillRect(0, 0, s, s);
+    for (let i = 0; i < 260; i++) {                       // grain d'enduit
+      const r = 2 + Math.random() * 9;
+      ctx.fillStyle = `rgba(${Math.random() > 0.5 ? '255,255,255' : '0,0,0'},0.035)`;
+      ctx.beginPath();
+      ctx.arc(Math.random() * s, Math.random() * s, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    grainNoise(ctx, s, 8);
+  },
+
+  parquet(ctx, s) {
+    ctx.fillStyle = '#dcdcdc'; ctx.fillRect(0, 0, s, s);
+    const rows = 4, plank = s / rows;
+    for (let r = 0; r < rows; r++) {
+      const offset = (r % 2) * plank;                     // pose à coupe perdue
+      for (let x = -plank; x < s; x += plank * 2) {
+        const y = r * plank;
+        ctx.fillStyle = `rgba(0,0,0,${0.02 + Math.random() * 0.05})`;
+        ctx.fillRect(x + offset, y, plank * 2 - 2, plank - 2);
+        ctx.strokeStyle = 'rgba(30,20,10,0.3)'; ctx.lineWidth = 1.5;
+        ctx.strokeRect(x + offset, y, plank * 2 - 2, plank - 2);
+      }
+    }
+    grainNoise(ctx, s, 10);
+  },
+
+  feuillage(ctx, s) {
+    ctx.fillStyle = '#d6d6d6'; ctx.fillRect(0, 0, s, s);
+    for (let i = 0; i < 90; i++) {
+      ctx.fillStyle = `rgba(${Math.random() > 0.5 ? '255,255,255' : '0,0,0'},0.07)`;
+      ctx.beginPath();
+      ctx.ellipse(Math.random() * s, Math.random() * s, 4 + Math.random() * 14,
+                  2 + Math.random() * 6, Math.random() * Math.PI, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    grainNoise(ctx, s, 14);
+  },
+
+  lisse(ctx, s) {
+    ctx.fillStyle = '#e8e8e8'; ctx.fillRect(0, 0, s, s);
+    grainNoise(ctx, s, 5);
+  },
+};
+
+const textureCache = new Map();
+
+// Les textures sont mutualisées par motif et par densité de répétition :
+// une poignée d'envois GPU au lieu d'un par matériau.
+function getTexture(name, tile) {
+  const key = `${name}@${tile}`;
+  const cached = textureCache.get(key);
+  if (cached) return cached;
+
+  let base = textureCache.get(name + '@source');
+  if (!base) {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 256;
+    (PATTERNS[name] ?? PATTERNS.lisse)(canvas.getContext('2d'), 256);
+    base = canvas;
+    textureCache.set(name + '@source', base);
+  }
+  const texture = new THREE.CanvasTexture(base);
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(tile, tile);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+  texture.needsUpdate = true;
+  textureCache.set(key, texture);
+  return texture;
+}
+
+function texturedMaterial(pattern, tile, role, extra = {}) {
+  const map = getTexture(pattern, tile);
+  const material = new THREE.MeshStandardMaterial({
+    color: 0xffffff, roughness: 0.85, metalness: 0.02, ...extra,
+  });
+  material.map = map;
+  material.bumpMap = map;
+  material.bumpScale = 0.35;
+  return trackMaterial(twinMaterials, material, role, { isSurface: true });
+}
+
+const PATTERN_BY_LABEL = {
+  couch: 'tissu', bed: 'tissu', plant: 'feuillage',
+  screen: 'lisse', lamp: 'lisse',
+};
+const patternFor = (label) => PATTERN_BY_LABEL[label] ?? 'bois';
 
 /* ================= mobilier procédural paramétré =================== *
  *  Chaque meuble est généré en code aux dimensions réelles de sa boîte,
@@ -575,16 +720,24 @@ function boxPart(w, h, d, x, y, z, material) {
 }
 
 const FURNITURE = {
-  couch(w, h, d, m) {
+  // `joins` porte les faces où un autre volume de même étiquette est
+  // accolé : le Space Setup découpe un canapé d'angle en deux volumes,
+  // et sans ça on obtient quatre accoudoirs au milieu du meuble.
+  couch(w, h, d, m, opts = {}) {
     const g = new THREE.Group();
-    const seat = h * 0.42, back = d * 0.24, arm = Math.min(w * 0.12, 0.16);
+    const j = opts.joins ?? {};
+    const seat = h * 0.42, arm = Math.min(w * 0.12, 0.16);
+    const back = j.back ? 0 : d * 0.24;   // dossier inutile s'il bute sur le voisin
     g.add(boxPart(w, seat, d, 0, seat / 2, 0, m.body));
-    g.add(boxPart(w, h, back, 0, h / 2, -d / 2 + back / 2, m.body));
-    for (const sx of [-1, 1]) g.add(boxPart(arm, h * 0.62, d, sx * (w - arm) / 2, h * 0.31, 0, m.body));
-    const span = w - 2 * arm, n = span > 1.4 ? 3 : 2;
+    if (back > 0) g.add(boxPart(w, h, back, 0, h / 2, -d / 2 + back / 2, m.body));
+    if (!j.left)  g.add(boxPart(arm, h * 0.62, d, -(w - arm) / 2, h * 0.31, 0, m.body));
+    if (!j.right) g.add(boxPart(arm, h * 0.62, d,  (w - arm) / 2, h * 0.31, 0, m.body));
+
+    const left = j.left ? 0 : arm, right = j.right ? 0 : arm;
+    const span = w - left - right, n = span > 1.4 ? 3 : 2;
     if (span > 0.05) for (let i = 0; i < n; i++) {
       g.add(boxPart(span / n * 0.9, h * 0.14, Math.max(0.02, d - back) * 0.9,
-        -span / 2 + span / n * (i + 0.5), seat + h * 0.07, back / 2, m.accent));
+        -w / 2 + left + span / n * (i + 0.5), seat + h * 0.07, back / 2, m.accent));
     }
     return g;
   },
@@ -733,6 +886,60 @@ function facesWall(item, frame) {
   return back.dot(toWall) < 0;         // le dos tourne le dos au mur : à retourner
 }
 
+// Deux volumes de même étiquette collés l'un à l'autre forment un seul
+// meuble dans la réalité. On repère, dans le repère du modèle, la face
+// par laquelle le voisin arrive.
+const JOIN_GAP = 0.4;
+
+// Distance du centre d'une boîte à sa surface, dans une direction donnée
+// exprimée dans son propre repère : le rayon sort par la face qu'il
+// atteint en premier. Une demi-largeur seule sous-estimerait la portée
+// dès que le voisin n'est pas pile dans l'axe.
+function reachAlong(frame, dirX, dirZ) {
+  const u = Math.abs(dirX), v = Math.abs(dirZ);
+  return Math.min(u > 1e-6 ? (frame.width / 2) / u : Infinity,
+                  v > 1e-6 ? (frame.depth / 2) / v : Infinity);
+}
+
+function planeAxes(item, frame) {
+  return [
+    new THREE.Vector3(1, 0, 0).applyQuaternion(frame.quaternion)
+      .transformDirection(item.group.matrix).setY(0).normalize(),
+    new THREE.Vector3(0, 0, 1).applyQuaternion(frame.quaternion)
+      .transformDirection(item.group.matrix).setY(0).normalize(),
+  ];
+}
+
+function findJoins(item, frame) {
+  const joins = {};
+  const centre = frame.base.clone().applyMatrix4(item.group.matrix);
+  const [axisX, axisZ] = planeAxes(item, frame);
+
+  for (const [, other] of items) {
+    if (other === item || !other.frame || !other.group.visible) continue;
+    if (other.effectiveLabel !== item.effectiveLabel) continue;
+
+    const delta = new THREE.Vector3()
+      .subVectors(other.frame.base.clone().applyMatrix4(other.group.matrix), centre);
+    delta.y = 0;
+    const span = delta.length();
+    if (span < 1e-4) continue;
+    const unit = delta.clone().divideScalar(span);
+
+    const [otherX, otherZ] = planeAxes(other, other.frame);
+    const gap = span
+      - reachAlong(frame, unit.dot(axisX), unit.dot(axisZ))
+      - reachAlong(other.frame, unit.dot(otherX), unit.dot(otherZ));
+    if (gap > JOIN_GAP) continue;
+
+    const dx = delta.dot(axisX), dz = delta.dot(axisZ);
+    joins[Math.abs(dx) > Math.abs(dz)
+      ? (dx > 0 ? 'right' : 'left')
+      : (dz > 0 ? 'front' : 'back')] = true;
+  }
+  return joins;
+}
+
 function applyFurnitureModel(item) {
   const builder = furnitureBuilder(item.effectiveLabel);
   if (item.model) {
@@ -743,16 +950,25 @@ function applyFurnitureModel(item) {
   if (!builder || !item.boxSurface) { if (item.boxSurface) item.boxSurface.visible = true; return; }
 
   const frame = computeBoxFrame(item);
+  const pattern = patternFor(item.effectiveLabel);
+  const tile = 1 / Math.max(0.25, Math.min(frame.width, frame.depth));
   const materials = {
-    body: trackMaterial(twinMaterials, new THREE.MeshStandardMaterial({
-      color: 0xffffff, roughness: 0.82, metalness: 0.03 }), 'furniture', { isSurface: true }),
-    accent: trackMaterial(twinMaterials, new THREE.MeshStandardMaterial({
-      color: 0xffffff, roughness: 0.7, metalness: 0.05 }), 'furnitureAccent', { isSurface: true }),
+    body: texturedMaterial(pattern, tile, 'furniture', { roughness: 0.82, metalness: 0.03 }),
+    accent: texturedMaterial(pattern === 'tissu' ? 'tissu' : 'bois', tile,
+                             'furnitureAccent', { roughness: 0.7, metalness: 0.05 }),
   };
-  const model = builder(frame.width, frame.height, frame.depth, materials);
+  const flipped = BACKED.has(item.effectiveLabel) && facesWall(item, frame);
+  const joins = findJoins(item, frame);
+  if (flipped) {                      // le demi-tour échange gauche/droite et avant/arrière
+    const { left, right, front, back } = joins;
+    joins.left = right; joins.right = left; joins.front = back; joins.back = front;
+  }
+  item.joinKey = ['left', 'right', 'front', 'back'].map((k) => (joins[k] ? 1 : 0)).join('');
+
+  const model = builder(frame.width, frame.height, frame.depth, materials, { joins });
   model.position.copy(frame.base);
   model.quaternion.copy(frame.quaternion);
-  if (BACKED.has(item.effectiveLabel) && facesWall(item, frame)) model.rotateY(Math.PI);
+  if (flipped) model.rotateY(Math.PI);
 
   item.twin.add(model);
   item.model = model;
@@ -917,7 +1133,6 @@ function relabel(item, label) {
   item.effectiveLabel = label;
   const hex = overlayColor(label);
   item.overlay.traverse((o) => { if (o.material?.color) o.material.color.setHex(hex); });
-  applyFurnitureModel(item);
 }
 
 function matchVolumes() {
@@ -945,6 +1160,18 @@ function matchVolumes() {
   // Le plan garde son rôle de repère en mode réel, mais son extrusion
   // approximative disparaît du jumeau dès qu'on a le volume exact.
   for (const top of tops) top.twin.visible = !top.boxPartner;
+
+  // Les jonctions se lisent entre voisins : tous les repères doivent
+  // exister avant qu'un seul modèle ne soit construit.
+  for (const box of boxes) if (!box.frame && box.boxSurface) box.frame = computeBoxFrame(box);
+  for (const box of boxes) {
+    const joins = box.frame ? findJoins(box, box.frame) : {};
+    const key = ['left', 'right', 'front', 'back'].map((k) => (joins[k] ? 1 : 0)).join('');
+    if (box.modelLabel !== box.effectiveLabel || (box.joinKey && box.joinKey !== key)) {
+      box.modelLabel = box.effectiveLabel;
+      applyFurnitureModel(box);
+    }
+  }
 }
 
 function updateInventory() {
@@ -1199,34 +1426,58 @@ ui.copy.addEventListener('click', async () => {
 // Le casque déclare un périphérique vidéo : est-ce une vraie caméra, et
 // que voit-elle ? Seul un getUserMedia réel peut trancher.
 ui.camTest.addEventListener('click', async () => {
+  const trace = [];
+  const say = (msg) => {
+    trace.push(msg);
+    ui.camResult.innerHTML = trace.map((t) => `<div>${t}</div>`).join('');
+    ui.camResult.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+
   ui.camTest.disabled = true;
-  ui.camResult.textContent = 'Demande d\'autorisation…';
+  ui.camResult.className = 'active';
+  trace.length = 0;
+  say('1. Test lancé.');
+
   let stream = null;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    if (!navigator.mediaDevices) { say('2. navigator.mediaDevices absent — accès impossible.'); return; }
+    say('2. mediaDevices présent, contexte ' + (isSecureContext ? 'sécurisé' : 'NON sécurisé'));
+
+    const before = await navigator.mediaDevices.enumerateDevices();
+    const cams = before.filter((d) => d.kind === 'videoinput');
+    say(`3. ${cams.length} périphérique(s) vidéo : ` +
+        (cams.map((d) => d.label || '(nom masqué)').join(', ') || 'aucun'));
+
+    say('4. Demande d\'autorisation en cours — regarde si le casque affiche une fenêtre…');
+
+    // Sur Quest, la demande peut rester sans réponse : on borne l'attente.
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('aucune réponse après 20 s')), 20000));
+    stream = await Promise.race([navigator.mediaDevices.getUserMedia({ video: true }), timeout]);
+
     const track = stream.getVideoTracks()[0];
     const settings = track.getSettings();
+    say(`5. Flux obtenu : « ${track.label || 'sans nom'} », ${settings.width}×${settings.height}`);
 
     const video = document.createElement('video');
-    video.srcObject = stream;
-    video.muted = true; video.playsInline = true;
+    video.srcObject = stream; video.muted = true; video.playsInline = true;
     await video.play();
-    await new Promise((r) => setTimeout(r, 400));   // laisser arriver une image
+    await new Promise((r) => setTimeout(r, 500));
 
     const canvas = document.createElement('canvas');
     canvas.width = video.videoWidth || settings.width || 320;
     canvas.height = video.videoHeight || settings.height || 240;
     canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    caps.getUserMedia = { label: track.label, settings };
-    ui.camResult.textContent =
-      `Flux obtenu — « ${track.label || 'sans nom'} » ${canvas.width}×${canvas.height}`;
+    say(`6. Image capturée en ${canvas.width}×${canvas.height} — la voici :`);
     ui.camResult.appendChild(canvas);
+
+    caps.getUserMedia = { label: track.label, settings, capture: [canvas.width, canvas.height] };
     video.pause(); video.srcObject = null;
   } catch (err) {
-    caps.getUserMedia = { error: err.name, message: err.message };
-    ui.camResult.textContent = `Refusé — ${err.name} : ${err.message}`;
+    caps.getUserMedia = { error: err.name ?? 'Error', message: err.message };
+    say(`ÉCHEC — ${err.name ?? 'Error'} : ${err.message}`);
   } finally {
+    caps.trace = trace;
     stream?.getTracks().forEach((t) => t.stop());
     ui.camTest.disabled = false;
     ui.digest.value = JSON.stringify({ capacites: caps, scan: lastScan }, null, 2);
