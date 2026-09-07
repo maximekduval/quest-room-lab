@@ -52,6 +52,9 @@
   .row:last-child { border-bottom: 0; }
   .row .k { color: #cfe0f7; } .row .v { color: #7f94b6; font-variant-numeric: tabular-nums; }
   .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  #cam-result { margin-top: 12px; font-size: 13px; color: #9db0d0; line-height: 1.6; }
+  #cam-result canvas { display: block; margin-top: 8px; max-width: 100%; border-radius: 10px;
+                       border: 1px solid rgba(124,243,255,.25); }
   #digest {
     width: 100%; height: 220px; margin-top: 14px; padding: 12px;
     border-radius: 12px; border: 1px solid rgba(124,243,255,.18);
@@ -90,7 +93,9 @@
         <button class="ghost" id="dl-json">Télécharger le scan (.json)</button>
         <button class="ghost" id="dl-glb">Télécharger le jumeau (.glb)</button>
         <button class="ghost" id="copy">Copier tout dans le presse-papier</button>
+        <button class="ghost" id="cam-test">Tester l'accès caméra</button>
       </div>
+      <div id="cam-result"></div>
       <textarea id="digest" readonly placeholder="Le scan complet apparaîtra ici à la sortie de session."></textarea>
     </div>
   </div>
@@ -174,6 +179,8 @@ const ui = {
   dlJson: document.getElementById('dl-json'),
   dlGlb: document.getElementById('dl-glb'),
   copy: document.getElementById('copy'),
+  camTest: document.getElementById('cam-test'),
+  camResult: document.getElementById('cam-result'),
   digest: document.getElementById('digest'),
 };
 
@@ -458,13 +465,23 @@ function polygonArea(polygon) {
   return Math.abs(a) / 2;
 }
 
-function classify(label, orientation) {
+// Le casque expose deux natures de maillage très différentes : le scan
+// complet de la pièce (dizaines de milliers de triangles) et, pour chaque
+// meuble, une boîte englobante de 12 triangles. On les sépare au volume.
+const BOX_TRIANGLE_LIMIT = 64;
+
+function classify(label, orientation, source, tris) {
   const l = (label || '').toLowerCase();
+  if (source === 'mesh') return tris > BOX_TRIANGLE_LIMIT ? 'globalmesh' : 'volume';
   if (STRUCTURE.has(l)) return l === 'floor' ? 'floor' : (l === 'ceiling' ? 'ceiling' : 'wall');
   if (OPENINGS.has(l) && orientation === 'vertical') return 'opening';
   if (orientation === 'horizontal') return 'volume';
   return 'wall';
 }
+
+// Le sol n'est pas exactement à y=0 : on prend sa hauteur mesurée comme
+// référence pour l'extrusion de repli.
+let floorY = 0;
 
 /* ================== 3. reconstruction du jumeau ===================== */
 
@@ -534,11 +551,11 @@ function buildTwinForPlane(plane, kind, heightAboveFloor) {
   return group;
 }
 
-function buildTwinForMesh(geometry) {
+function buildTwinForMesh(geometry, role) {
   const group = new THREE.Group();
   const surface = new THREE.Mesh(geometry, trackMaterial(twinMaterials, new THREE.MeshStandardMaterial({
     color: 0xffffff, roughness: 0.9, metalness: 0.0, side: THREE.DoubleSide, flatShading: true,
-  }), 'mesh', { isSurface: true }));
+  }), role, { isSurface: true }));
   group.add(surface);
   group.userData.collider = surface;
   return group;
@@ -616,12 +633,14 @@ function buildItem(xr, source, heightAboveFloor) {
     group: new THREE.Group(),
     tris: 0, area: 0,
   };
-  item.kind = classify(label, item.orientation);
+  item.effectiveLabel = label;
 
   if (source === 'plane') {
+    item.kind = classify(label, item.orientation, 'plane', 0);
     item.area = polygonArea(xr.polygon ?? []);
+    if (item.kind === 'floor') floorY = heightAboveFloor;
     item.overlay = buildOverlayForPlane(xr);
-    item.twin = buildTwinForPlane(xr, item.kind, heightAboveFloor);
+    item.twin = buildTwinForPlane(xr, item.kind, heightAboveFloor - floorY);
   } else {
     const vertices = xr.vertices ?? xr.positions;
     const indices = xr.indices;
@@ -631,9 +650,11 @@ function buildItem(xr, source, heightAboveFloor) {
       geometry.setIndex(new THREE.BufferAttribute(indices, 1));
       geometry.computeVertexNormals();
       item.tris = indices.length / 3;
+      item.kind = classify(label, null, 'mesh', item.tris);
       item.overlay = buildOverlayForMesh(geometry, label);
-      item.twin = buildTwinForMesh(geometry);
+      item.twin = buildTwinForMesh(geometry, item.kind === 'globalmesh' ? 'mesh' : 'furniture');
     } else {
+      item.kind = 'globalmesh';
       item.overlay = new THREE.Group();
       item.twin = new THREE.Group();
     }
@@ -680,7 +701,49 @@ function syncScan(frame, refSpace) {
 
   consider(planes, 'plane', 'planeSpace');
   consider(meshes, 'mesh', 'meshSpace');
+  matchVolumes();
   updateInventory();
+}
+
+// Chaque meuble arrive en double : un plan sémantique (sa face du dessus,
+// porteuse de l'étiquette) et une boîte englobante de 12 triangles (son
+// vrai volume, souvent sans étiquette). Les deux partagent exactement la
+// même origine — on les apparie pour donner au volume le nom du plan, et
+// on cesse d'extruder le plan puisque le volume réel existe déjà.
+const MATCH_RADIUS = 0.08;
+
+function relabel(item, label) {
+  if (item.effectiveLabel === label) return;
+  item.effectiveLabel = label;
+  const hex = overlayColor(label);
+  item.overlay.traverse((o) => { if (o.material?.color) o.material.color.setHex(hex); });
+}
+
+function matchVolumes() {
+  const boxes = [], tops = [];
+  for (const [, item] of items) {
+    if (!item.group.visible) continue;
+    if (item.source === 'mesh' && item.kind === 'volume') boxes.push(item);
+    else if (item.source === 'plane' && item.kind === 'volume') tops.push(item);
+  }
+  for (const top of tops) top.boxPartner = null;
+
+  for (const box of boxes) {
+    let best = null, bestDistance = MATCH_RADIUS;
+    for (const top of tops) {
+      if (top.boxPartner) continue;
+      const d = box.group.position.distanceTo(top.group.position);
+      if (d < bestDistance) { bestDistance = d; best = top; }
+    }
+    box.topPartner = best;
+    if (best) {
+      best.boxPartner = box;
+      relabel(box, best.label);
+    }
+  }
+  // Le plan garde son rôle de repère en mode réel, mais son extrusion
+  // approximative disparaît du jumeau dès qu'on a le volume exact.
+  for (const top of tops) top.twin.visible = !top.boxPartner;
 }
 
 function updateInventory() {
@@ -690,7 +753,8 @@ function updateInventory() {
     if (item.source === 'plane') inventory.planes++; else inventory.meshes++;
     inventory.tris += item.tris;
     if (item.kind === 'floor') inventory.floorArea += item.area;
-    inventory.byLabel.set(item.label, (inventory.byLabel.get(item.label) ?? 0) + 1);
+    if (item.source === 'plane' && item.boxPartner) continue;   // compté via son volume
+    inventory.byLabel.set(item.effectiveLabel, (inventory.byLabel.get(item.effectiveLabel) ?? 0) + 1);
   }
 }
 
@@ -860,7 +924,9 @@ function snapshotScan() {
     const el = {
       source: item.source,
       semanticLabel: item.label,
+      effectiveLabel: item.effectiveLabel,
       kind: item.kind,
+      pairedWithVolume: !!item.boxPartner,
       orientation: item.orientation,
       matrix: item.group.matrix.toArray(),
     };
@@ -919,6 +985,43 @@ ui.copy.addEventListener('click', async () => {
     ui.copy.textContent = 'Sélectionné — Ctrl/Cmd+C';
   }
   setTimeout(() => { ui.copy.textContent = 'Copier tout dans le presse-papier'; }, 2500);
+});
+
+// Le casque déclare un périphérique vidéo : est-ce une vraie caméra, et
+// que voit-elle ? Seul un getUserMedia réel peut trancher.
+ui.camTest.addEventListener('click', async () => {
+  ui.camTest.disabled = true;
+  ui.camResult.textContent = 'Demande d\'autorisation…';
+  let stream = null;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    const track = stream.getVideoTracks()[0];
+    const settings = track.getSettings();
+
+    const video = document.createElement('video');
+    video.srcObject = stream;
+    video.muted = true; video.playsInline = true;
+    await video.play();
+    await new Promise((r) => setTimeout(r, 400));   // laisser arriver une image
+
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth || settings.width || 320;
+    canvas.height = video.videoHeight || settings.height || 240;
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    caps.getUserMedia = { label: track.label, settings };
+    ui.camResult.textContent =
+      `Flux obtenu — « ${track.label || 'sans nom'} » ${canvas.width}×${canvas.height}`;
+    ui.camResult.appendChild(canvas);
+    video.pause(); video.srcObject = null;
+  } catch (err) {
+    caps.getUserMedia = { error: err.name, message: err.message };
+    ui.camResult.textContent = `Refusé — ${err.name} : ${err.message}`;
+  } finally {
+    stream?.getTracks().forEach((t) => t.stop());
+    ui.camTest.disabled = false;
+    ui.digest.value = JSON.stringify({ capacites: caps, scan: lastScan }, null, 2);
+  }
 });
 
 function showReport() {
