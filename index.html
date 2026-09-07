@@ -1493,7 +1493,13 @@ const rig = { yaw: 0, pitch: 0, roll: 0, tx: 0.032, ty: -0.02, tz: -0.05, focal:
 // Le casque expose deux objectifs « back », distants d'environ 6,5 cm,
 // et startCameraFeed prend celui que le pilote sert. Un réglage fait sur
 // l'un est faux sur l'autre : on garde donc un rig par libellé.
-const DEFAULT_RIG = { yaw: 0, pitch: 0, roll: 0, tx: 0.032, ty: -0.02, tz: -0.05, focal: 0 };
+// Point de départ mesuré sur Quest 3 par l'alignement automatique :
+// lacet et roulis nuls à 0,2° près, et un piqué de 11,8° — les caméras
+// passthrough sont inclinées vers le bas pour voir les mains. Ce n'est
+// pas un point principal décentré déguisé : 11,8° à 425 px feraient
+// 87 px sur 480, soit 18 % de la hauteur, ce qu'aucun objectif ne fait.
+// Y raffine à partir de là au lieu de chercher depuis zéro.
+const DEFAULT_RIG = { yaw: 0, pitch: -0.205, roll: 0, tx: 0.032, ty: -0.02, tz: -0.05, focal: 0 };
 let rigStore = {}, rigKey = 'inconnue';
 
 function loadRig() {
@@ -1677,6 +1683,8 @@ function updateCalibView(dt, time) {
   });
   viewCtx.globalAlpha = 1;
 
+  drawVolumeTargets();
+
   // Croix centrale : repère du point principal, supposé au centre.
   viewCtx.strokeStyle = 'rgba(255,255,255,0.5)';
   viewCtx.lineWidth = 1;
@@ -1696,10 +1704,69 @@ function updateCalibView(dt, time) {
   viewCtx.font = '400 16px system-ui, sans-serif';
   viewCtx.fillText(`lacet ${deg(rig.yaw)}° · tangage ${deg(rig.pitch)}° · roulis ${deg(rig.roll)}°` +
                    ` · retard ${lag} ms · ${rigKey}` +
-                   (alignScore != null ? ` · Y : score ${alignScore.toFixed(3)}` : ' · Y = aligner'),
+                   (alignScore != null ? ` · Y ${alignScore.toFixed(3)}` : ' · Y = aligner') +
+                   ` · ${targetCount.framed} volumes cadrés, ${targetCount.unnamed} sans nom`,
                    12, VIEW_H - 7);
   viewTexture.needsUpdate = true;
 }
+
+/* -------------- les volumes du scan, cadrés dans l'image ------------ *
+ *  La moitié « localiser » du pipeline de reconnaissance, rendue
+ *  visible : chaque volume du scan devient un rectangle dans l'image.
+ *  C'est exactement l'entrée qu'attend l'étape de nommage — classer une
+ *  vignette recadrée est bien plus simple que détecter dans une image
+ *  entière. Les volumes que le Space Setup n'a pas su nommer sont la
+ *  cible : ils ressortent en ambre.
+ * =================================================================== */
+
+function drawVolumeTargets() {
+  let framed = 0, unnamed = 0;
+  for (const [, item] of items) {
+    if (!item.group.visible || item.source !== 'mesh') continue;
+    if (item.kind !== 'volume' || !item.boxSurface) continue;
+    const box = item.boxSurface.geometry.boundingBox;
+    if (!box) continue;
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, seen = 0;
+    for (let k = 0; k < 8; k++) {
+      boxCorner.set(k & 1 ? box.max.x : box.min.x,
+                    k & 2 ? box.max.y : box.min.y,
+                    k & 4 ? box.max.z : box.min.z);
+      edgeA.copy(boxCorner).applyMatrix4(item.group.matrix);
+      if (!toImage(edgeA, pointA)) continue;
+      seen++;
+      minX = Math.min(minX, pointA.x); maxX = Math.max(maxX, pointA.x);
+      minY = Math.min(minY, pointA.y); maxY = Math.max(maxY, pointA.y);
+    }
+    // Un volume dont plusieurs sommets passent derrière l'objectif donne
+    // un cadre faux : mieux vaut ne rien montrer.
+    if (seen < 8) continue;
+    if (maxX < 0 || minX > VIEW_W || maxY < 0 || minY > VIEW_H) continue;
+    minX = Math.max(0, minX); minY = Math.max(0, minY);
+    maxX = Math.min(VIEW_W, maxX); maxY = Math.min(VIEW_H, maxY);
+    if (maxX - minX < 12 || maxY - minY < 12) continue;
+
+    framed++;
+    const nameless = item.effectiveLabel === 'global mesh';
+    if (nameless) unnamed++;
+    viewCtx.strokeStyle = nameless ? '#ffc247'
+      : '#' + overlayColor(item.effectiveLabel).toString(16).padStart(6, '0');
+    viewCtx.lineWidth = nameless ? 3 : 1.5;
+    viewCtx.setLineDash(nameless ? [] : [6, 4]);
+    viewCtx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+    viewCtx.setLineDash([]);
+
+    const text = nameless ? '?  à identifier' : item.effectiveLabel;
+    viewCtx.font = nameless ? '600 16px system-ui, sans-serif' : '400 13px system-ui, sans-serif';
+    const pad = viewCtx.measureText(text).width + 8;
+    viewCtx.fillStyle = 'rgba(6,12,22,0.75)';
+    viewCtx.fillRect(minX, Math.max(0, minY - 18), pad, 17);
+    viewCtx.fillStyle = viewCtx.strokeStyle;
+    viewCtx.fillText(text, minX + 4, Math.max(12, minY - 5));
+  }
+  targetCount = { framed, unnamed };
+}
+let targetCount = { framed: 0, unnamed: 0 };
 
 /* ------------- alignement automatique sur les arêtes --------------- *
  *  Régler quatre paramètres à la miniature est pénible et peu fiable.

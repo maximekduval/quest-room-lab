@@ -146,7 +146,39 @@ n'a pas d'arête franche dans l'image.
 
 Sur pièce synthétique, en partant de trois angles nuls et d'une focale fausse de
 15 %, il retrouve le rig à **0,6° près sur les trois angles et 1 % sur la focale** —
-très en deçà du budget de 3° que demande l'association d'objets.
+très en deçà du budget de 3° que demande l'association d'objets. Le banc inclut le
+rig réellement trouvé sur le casque, donc l'optimiseur est vérifié à son point de
+fonctionnement et pas seulement sur des cas d'école.
+
+Ajouter la focale verticale comme cinquième inconnue a été essayé et **retiré** :
+lacet et focale horizontale se compensent alors mutuellement, et l'erreur passe de
+0,34° à 3,83° sur le lacet, de 1 % à 18 % sur la focale. Le couplage fx = fy n'est
+pas une approximation paresseuse, c'est la contrainte qui régularise l'ajustement.
+Les pixels carrés sont par ailleurs confirmés par la corrélation, qui a rendu
+fx = 228,6 et fy = 225,8 — 1,2 % d'écart.
+
+### Le rig mesuré
+
+| | |
+|---|---|
+| lacet | +0,22° |
+| roulis | +0,14° |
+| **tangage** | **−11,77°** — la caméra regarde vers le bas |
+| focale | 425,5 px@640, soit 73,9° |
+
+Deux angles nuls et un seul non nul : c'est la signature d'un montage symétrique
+bien usiné, incliné pour voir les mains. Et ce n'est pas un point principal décentré
+déguisé — 11,8° à 425 px feraient 87 px sur une image de 480 de haut, soit 18 % de
+la hauteur, ce qu'aucun objectif réel ne fait. Ce piqué est désormais le point de
+départ du recalage : **Y** raffine au lieu de chercher.
+
+### Les volumes cadrés dans l'image
+
+Le panneau dessine aussi, pour chaque volume du scan, son rectangle dans l'image :
+la moitié « localiser » du pipeline de reconnaissance, rendue visible. C'est
+exactement l'entrée qu'attend l'étape de nommage — classer une vignette recadrée est
+bien plus simple que détecter dans une image entière. Les volumes que le Space Setup
+n'a pas su nommer ressortent **en ambre** : ce sont les cibles.
 
 La projection est vérifiée sur quatorze conventions : un lacet de tête de 5° déplace
 bien un point fixe de `centre + focale·tan(5°)` — exactement le modèle que la
